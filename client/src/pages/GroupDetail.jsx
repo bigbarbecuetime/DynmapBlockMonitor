@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   getGroup, getPois, createPoi, updatePoi, deletePoi,
@@ -10,11 +10,25 @@ import ColorSwatch from '../components/ColorSwatch.jsx';
 
 const DEFAULT_POI = { name: '', x: '', z: '', tolerance: 0, active: true };
 
+// Mirror the server-side coordinate helpers (safe for negative block coords).
+function nativePixelOffset(x, z) {
+  return { nativePx: (x & 7) * 16, nativePz: (7 - (~z & 7)) * 16 };
+}
+function contextPixelOffset(x, z, TILE = 128) {
+  return {
+    pixelX: ((x % TILE) + TILE) % TILE,
+    pixelZ: (((119 - z) % TILE) + TILE) % TILE,
+  };
+}
+
 function POIForm({ initial, onSave, onCancel }) {
   const [form, setForm]     = useState({ ...DEFAULT_POI, ...initial });
   const [preview, setPreview] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState('');
+  // Suppresses the preview-reload effect when x/z are updated by drag (the DB
+  // hasn't been saved yet, so the endpoint would return stale coordinates).
+  const suppressPreviewReload = useRef(false);
 
   const set = (k) => (e) => {
     const v = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
@@ -23,11 +37,34 @@ function POIForm({ initial, onSave, onCancel }) {
 
   // Load tile preview when coords are valid integers
   useEffect(() => {
+    if (suppressPreviewReload.current) { suppressPreviewReload.current = false; return; }
     const x = parseInt(form.x);
     const z = parseInt(form.z);
     if (isNaN(x) || isNaN(z) || !initial?.id) return;
     getPoiPreview(initial.id).then(setPreview).catch(() => {});
   }, [form.x, form.z, initial?.id]);
+
+  // Called by the Context (zzzz) tile when the user finishes dragging.
+  function handleContextMove(newPx, newPz) {
+    if (!preview) return;
+    const new_x = (parseInt(form.x) - preview.pixelX) + newPx;
+    const new_z = (parseInt(form.z) + preview.pixelZ) - newPz;
+    const { nativePx, nativePz } = nativePixelOffset(new_x, new_z);
+    suppressPreviewReload.current = true;
+    setForm(f => ({ ...f, x: new_x, z: new_z }));
+    setPreview(p => ({ ...p, pixelX: newPx, pixelZ: newPz, nativePixelX: nativePx, nativePixelZ: nativePz }));
+  }
+
+  // Called by the Detail (native) tile when the user finishes dragging.
+  function handleDetailMove(newNativePx, newNativePz) {
+    if (!preview) return;
+    const new_x = parseInt(form.x) + (newNativePx - preview.nativePixelX) / 16;
+    const new_z = parseInt(form.z) + (newNativePz - preview.nativePixelZ) / 16;
+    const { pixelX, pixelZ } = contextPixelOffset(new_x, new_z);
+    suppressPreviewReload.current = true;
+    setForm(f => ({ ...f, x: new_x, z: new_z }));
+    setPreview(p => ({ ...p, pixelX, pixelZ, nativePixelX: newNativePx, nativePixelZ: newNativePz }));
+  }
 
   async function submit(e) {
     e.preventDefault();
@@ -84,15 +121,29 @@ function POIForm({ initial, onSave, onCancel }) {
       {preview && (
         <div>
           <label className="label">Tile Preview</label>
-          <p className="text-xs text-slate-500 mb-2">
-            Red box = target pixel at ({preview.pixelX}, {preview.pixelZ}) in the 128×128 tile
-          </p>
-          <TilePreview
-            tileUrl={preview.zoomTileUrl}
-            pixelX={preview.pixelX}
-            pixelZ={preview.pixelZ}
-            scale={3}
-          />
+          <div className="flex flex-wrap gap-4 mt-1">
+            <div>
+              <div className="text-xs text-slate-500 mb-1">Context</div>
+              <TilePreview
+                tileUrl={preview.zoomTileUrl}
+                pixelX={preview.pixelX}
+                pixelZ={preview.pixelZ}
+                scale={3}
+                onBlockMove={handleContextMove}
+              />
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 mb-1">Detail</div>
+              <TilePreview
+                tileUrl={preview.nativeTileUrl}
+                pixelX={preview.nativePixelX}
+                pixelZ={preview.nativePixelZ}
+                scale={3}
+                blockPixels={16}
+                onBlockMove={handleDetailMove}
+              />
+            </div>
+          </div>
         </div>
       )}
 
@@ -138,7 +189,7 @@ function POICard({ poi, onEdit, onDelete, onSetBaseline, onUpdateBaseline }) {
             {!hasBaseline && <span className="badge badge-yellow">no baseline</span>}
           </div>
           <div className="text-xs text-slate-500 mt-0.5 font-mono">
-            X: {poi.x}  Z: {poi.z}  ·  tile {poi.tile_key}  ·  px ({poi.pixel_x}, {poi.pixel_z})
+            X: {poi.x}  Z: {poi.z}
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
@@ -171,13 +222,26 @@ function POICard({ poi, onEdit, onDelete, onSetBaseline, onUpdateBaseline }) {
 
       {/* Tile preview */}
       {showPreview && preview && (
-        <div className="pt-1">
-          <TilePreview
-            tileUrl={preview.zoomTileUrl}
-            pixelX={preview.pixelX}
-            pixelZ={preview.pixelZ}
-            scale={3}
-          />
+        <div className="pt-1 flex flex-wrap gap-4">
+          <div>
+            <div className="text-xs text-slate-500 mb-1">Context</div>
+            <TilePreview
+              tileUrl={preview.zoomTileUrl}
+              pixelX={preview.pixelX}
+              pixelZ={preview.pixelZ}
+              scale={3}
+            />
+          </div>
+          <div>
+            <div className="text-xs text-slate-500 mb-1">Detail</div>
+            <TilePreview
+              tileUrl={preview.nativeTileUrl}
+              pixelX={preview.nativePixelX}
+              pixelZ={preview.nativePixelZ}
+              scale={3}
+              blockPixels={16}
+            />
+          </div>
         </div>
       )}
     </div>
@@ -228,7 +292,7 @@ export default function GroupDetail() {
   if (loading) return <div className="text-slate-500 text-sm">Loading...</div>;
   if (!group)  return <div className="text-red-400 text-sm">Group not found</div>;
 
-  const activePois = pois.filter(p => p.active);
+  const activePois = pois.filter(p => p.active && p.baseline_r !== null && p.baseline_r !== undefined);
 
   return (
     <div className="space-y-6">

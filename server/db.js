@@ -141,7 +141,7 @@ function getPoisForGroup(groupId) {
 }
 
 function getAllActivePois() {
-  return getDb().prepare('SELECT * FROM pois WHERE active = 1').all();
+  return getDb().prepare('SELECT * FROM pois WHERE active = 1 AND baseline_r IS NOT NULL').all();
 }
 
 function getPoi(id) {

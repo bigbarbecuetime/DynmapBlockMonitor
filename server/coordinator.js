@@ -157,14 +157,15 @@ function buildNativeTileUrl(dynmapUrl, worldName, mapType, x, z) {
 }
 
 /**
- * Return the pixel offset of block (x, z) within its native-zoom tile.
- * For Dynmap flat maps, 1 block = 1 pixel and tiles are 128×128.
+ * Return the top-left pixel of block (x, z) within its native-zoom tile.
+ * Native tiles are 128×128 px covering 8×8 blocks (16 px per block).
+ * Dynmap renders north (−z) at the top, so pixel row increases as game z increases.
  * Returns { nativePixelX, nativePixelZ }.
  */
 function nativePixelOffset(x, z) {
   return {
-    nativePixelX: x & 127,
-    nativePixelZ: ~z & 127,
+    nativePixelX: (x & 7) * 16,
+    nativePixelZ: (7 - (~z & 7)) * 16,
   };
 }
 

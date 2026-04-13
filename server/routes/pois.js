@@ -4,7 +4,7 @@ const { Router } = require('express');
 const db = require('../db');
 const { rebuildIndex } = require('../poller');
 const { samplePoiColor } = require('../detector');
-const { buildTileUrl } = require('../coordinator');
+const { buildTileUrl, computeTileKeyForBlock, nativePixelOffset } = require('../coordinator');
 
 const router = Router({ mergeParams: true });
 
@@ -93,14 +93,19 @@ router.get('/:id/preview', (req, res) => {
   if (!poi) return res.status(404).json({ error: 'POI not found' });
 
   const settings = db.getSettings();
-  // Flat URL format — no subdirectory
-  const zoomTileUrl = `/dynmap/tiles/${settings.world_name}/${settings.map_type}/${poi.tile_key}.png`;
+  const base = `/dynmap/tiles/${settings.world_name}/${settings.map_type}`;
+  const zoomTileUrl   = `${base}/${poi.tile_key}.png`;
+  const nativeTileUrl = `${base}/${computeTileKeyForBlock(poi.x, poi.z, '')}.png`;
+  const { nativePixelX, nativePixelZ } = nativePixelOffset(poi.x, poi.z);
 
   res.json({
     poi,
     zoomTileUrl,
     pixelX: poi.pixel_x,
     pixelZ: poi.pixel_z,
+    nativeTileUrl,
+    nativePixelX,
+    nativePixelZ,
   });
 });
 
