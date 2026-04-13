@@ -121,7 +121,7 @@ function POIForm({ initial, onSave, onCancel }) {
       {preview && (
         <div>
           <label className="label">Tile Preview</label>
-          <div className="flex flex-wrap gap-4 mt-1">
+          <div className="grid grid-cols-2 gap-4 mt-1">
             <div>
               <div className="text-xs text-slate-500 mb-1">Context</div>
               <TilePreview
