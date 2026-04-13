@@ -1,0 +1,26 @@
+{
+  "name": "dynmap-block-monitor",
+  "version": "1.0.0",
+  "description": "Watches Minecraft block coordinates via Dynmap and sends Discord alerts on changes",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "concurrently -n server,client -c cyan,magenta \"node --watch server/index.js\" \"npm run dev:client\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:client": "cd client && npm run dev",
+    "build:client": "cd client && npm run build",
+    "install:client": "cd client && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "express": "^4.18.3",
+    "http-proxy-middleware": "^3.0.0",
+    "sharp": "^0.33.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

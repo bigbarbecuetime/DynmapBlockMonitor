@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  blockmonitor:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DYNMAP_URL=http://dynmap.elgeis.com:10102
+      - WORLD_NAME=8302018
+      - MAP_TYPE=flat2
+      - POLL_INTERVAL=10000
+      - DB_PATH=/app/data/monitor.db
+      - ALERTS_DIR=/app/data/alerts
+      - OFFLINE_THRESHOLD=300000
+      - RESCAN_COOLDOWN=60000
+      - MAX_CONCURRENT_FETCHES=3
