@@ -63,6 +63,13 @@ Dockerfile       Multi-stage build (client build -> runtime image)
 docker-compose.yml
 ```
 
+## Missing Features
+Ability to globally save all chunk changes across the map if desired.
+Free selection zones vs single point tracking.
+Additional dynmap metadata.
+Explore additional sources of data/plugin support. 
+
+
 
 
 Licensed under CC BY 4.0 ([https://creativecommons.org/licenses/by/4.0/deed.en](https://creativecommons.org/licenses/by/4.0/deed.en)).
