@@ -7,9 +7,9 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      - DYNMAP_URL=http://dynmap.elgeis.com:10102
-      - WORLD_NAME=8302018
-      - MAP_TYPE=flat2
+      - DYNMAP_URL=${DYNMAP_URL:-http://your-server:8123}
+      - WORLD_NAME=${WORLD_NAME:-world}
+      - MAP_TYPE=${MAP_TYPE:-flat2}
       - POLL_INTERVAL=10000
       - DB_PATH=/app/data/monitor.db
       - ALERTS_DIR=/app/data/alerts

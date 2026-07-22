@@ -294,8 +294,8 @@ function setState(key, value) {
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 const SETTINGS_DEFAULTS = {
-  dynmap_url: process.env.DYNMAP_URL || 'http://dynmap.elgeis.com:10102',
-  world_name: process.env.WORLD_NAME || '8302018',
+  dynmap_url: process.env.DYNMAP_URL || 'http://your-server:8123',
+  world_name: process.env.WORLD_NAME || 'world',
   map_type: process.env.MAP_TYPE || 'flat2',
   poll_interval: process.env.POLL_INTERVAL || '10000',
   offline_threshold: process.env.OFFLINE_THRESHOLD || '300000',

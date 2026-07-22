@@ -1,0 +1,18 @@
+services:
+  tracker:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      - DYNMAP_URL=${DYNMAP_URL:-http://your-server:8123}
+      - WORLD_NAME=${WORLD_NAME:-world}
+      - MAP_TYPE=${MAP_TYPE:-flat2}
+      # Minecraft server queried directly for player count (Dynmap can hide players).
+      # MC_HOST defaults to the Dynmap host if left blank.
+      - MC_HOST=${MC_HOST:-}
+      - MC_PORT=${MC_PORT:-25565}
+      - POLL_INTERVAL=10
+      - OUT_DIR=/data
+      - SAVE_IMAGES=false
+      # - HTTP_TIMEOUT=8
