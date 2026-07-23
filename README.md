@@ -12,32 +12,59 @@ Currently two versions depending on your need:
 
 ## Quickstart: Tracker
 
-Polls two sources and writes to a local `./data` folder:
+Runs from a prebuilt image on GitHub Container Registry. It logs two sources to a local `./data` folder:
 
-- `players.jsonl` Online player count from the Minecraft server directly (Server List Ping),
-  one line each time it changes. Dynmap can hide players, so the count is read from the game
-  server instead of Dynmap.
-- `chunks.jsonl` Every changed map tile (chunk) from Dynmap, as a full tile URL with a timestamp
+- `players.jsonl` Online player count and name list from the Minecraft server directly
+  (Server List Ping), one line each time it changes. Dynmap can hide players, so this is read
+  from the game server instead of Dynmap.
+- `chunks.jsonl` Every changed map tile (chunk) from Dynmap, as a full tile URL with a timestamp.
+  Only native (full-detail) tiles are logged; Dynmap's zoomed-out duplicates are skipped.
 - `chunks/` PNG of each changed tile, only if `SAVE_IMAGES=true` (off by default)
 
-**Docker** (edit the env in [`tracker/docker-compose.yml`](tracker/docker-compose.yml) first):
+### Run with Docker
 
-```bash
-cd tracker
-docker compose up --build
+Make an empty folder and drop in two files:
+
+`docker-compose.yml`
+```yaml
+name: dynmap-tracker
+
+services:
+  tracker:
+    image: ghcr.io/bigbarbecuetime/dynmap-tracker:latest
+    container_name: dynmap-tracker
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
 ```
 
-**Python** (Python 3.8+, no dependencies to install):
-
-```bash
-cd tracker
-DYNMAP_URL=http://your-server:8123 WORLD_NAME=world MAP_TYPE=flat python tracker.py
+`.env` (fill in your server; full option list in the table below)
+```
+DYNMAP_URL=http://your-server:8123
+WORLD_NAME=world
+MAP_TYPE=flat2
+MC_HOST=your-server
+MC_PORT=25565
 ```
 
-Point `DYNMAP_URL`, `WORLD_NAME`, and `MAP_TYPE` at your target server. Images are off by
-default to keep storage tiny, set `SAVE_IMAGES=true` if you want the actual tile pictures.
+Then start it:
+```bash
+docker compose up -d
+```
 
-Set via environment variables (see [`tracker/docker-compose.yml`](tracker/docker-compose.yml)):
+Logs land in `./data`. Update later with `docker compose pull && docker compose up -d`.
+
+### Run without Docker
+
+It is a single standard-library file (Python 3.8+), so there is nothing to install:
+```bash
+DYNMAP_URL=http://your-server:8123 WORLD_NAME=world MC_HOST=your-server MC_PORT=25565 python tracker.py
+```
+
+### Configuration
+
+Set in `.env` (see [`tracker/.env.example`](tracker/.env.example)) or as environment variables:
 
 | Variable        | Default                            | Description                                     |
 | --------------- | ---------------------------------- | ----------------------------------------------- |
@@ -56,6 +83,26 @@ Find `WORLD_NAME` and `MAP_TYPE` from the Dynmap in a browser, or `{DYNMAP_URL}/
 non-standard port behind an SRV record, so the joinable name alone isn't enough: look up
 `_minecraft._tcp.<host>` (e.g. `nslookup -type=SRV _minecraft._tcp.mc.examplename.com`) to get the
 actual port. The tracker does not resolve SRV records itself.
+
+### Local development
+
+Edit
+[`tracker/tracker.py`](tracker/tracker.py) and run it directly (plain Python reads its config
+from shell env vars, not `.env`):
+
+```bash
+cd tracker
+DYNMAP_URL=http://your-server:8123 WORLD_NAME=world MC_HOST=your-server MC_PORT=25565 python tracker.py
+```
+
+To test the Docker image built from your local code instead of pulling from GHCR, uncomment
+`build: .` in [`tracker/docker-compose.yml`](tracker/docker-compose.yml), then:
+
+```bash
+cd tracker
+cp .env.example .env    # then fill it in
+docker compose up --build
+```
 
 ---
 
@@ -137,5 +184,7 @@ docker-compose.yml
 - Detection of wide scale destruction and assignment of players
 
 ---
+
+Both the Tracker and the Block Monitor follow [Semantic Versioning](https://semver.org/).
 
 Licensed under CC BY 4.0 ([https://creativecommons.org/licenses/by/4.0/deed.en](https://creativecommons.org/licenses/by/4.0/deed.en)).

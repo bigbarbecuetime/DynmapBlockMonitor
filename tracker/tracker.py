@@ -3,16 +3,18 @@
 
 Logs two things to a local folder from two sources:
 
-  players.jsonl  - online player count from the Minecraft server itself (Server List
-                   Ping), one line each time it changes. Dynmap can hide players, so
-                   the count is read straight from the game server instead.
+  players.jsonl  - online player count + name list from the Minecraft server itself
+                   (Server List Ping), one line each time it changes. Dynmap can hide
+                   players, so this is read straight from the game server instead.
   chunks.jsonl   - every changed map tile (chunk) from Dynmap's /up/world feed, as a
-                   full tile URL with a timestamp.
+                   full tile URL with a timestamp. Only native (full-detail) tiles are
+                   logged; Dynmap's zoomed-out duplicates are skipped.
   chunks/        - PNG image of each changed tile (only when SAVE_IMAGES=true, these could get quite large)
 """
 
 import json
 import os
+import signal
 import socket
 import struct
 import time
@@ -124,9 +126,10 @@ def _read_varint(sock):
             return num
     raise ValueError("VarInt too long")
 
-def ping_player_count(host, port):
-    # The game server reports its online count via Server List Ping even when Dynmap
-    # has player display turned off. Returns the count as an int.
+def ping_players(host, port):
+    # The game server reports its player list via Server List Ping even when Dynmap
+    # has player display turned off. Returns (online_count, sorted_name_list).
+    # Note: the name list is the server's "sample" -- some servers cap or hide it.
     host_bytes = host.encode("utf-8")
     handshake = (_pack_varint(0x00)                       # packet id: handshake
                  + _pack_varint(-1)                       # protocol version (-1 = unspecified)
@@ -141,8 +144,9 @@ def ping_player_count(host, port):
         _read_varint(s)                                   # response length (ignored)
         _read_varint(s)                                   # packet id (0x00)
         raw = _recv_exact(s, _read_varint(s))             # JSON status payload
-    info = json.loads(raw.decode("utf-8"))
-    return int(info.get("players", {}).get("online", 0))
+    players = json.loads(raw.decode("utf-8")).get("players", {})
+    names = sorted(e["name"] for e in players.get("sample", []) if e.get("name"))
+    return int(players.get("online", 0)), names
 
 def record_event(name):
     # Startup/shutdown markers so on/off periods are visible alongside the data.
@@ -175,8 +179,13 @@ def warn_if_unclean_shutdown():
         record_event("warning! tracker closed without warning, end time unknown")
         log("previous run ended without a stop marker (end time unknown)")
 
+def _stop(*_):
+    # SIGTERM (docker stop) -> unwind into the try/finally so shutdown is recorded.
+    raise KeyboardInterrupt
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
+    signal.signal(signal.SIGTERM, _stop)
 
     # If the previous run never recorded a stop, warn before marking this startup.
     warn_if_unclean_shutdown()
@@ -185,7 +194,7 @@ def main():
     record_event("tracker starting")
 
     last_ts = 0
-    last_count = None
+    last_players = None
     url_base = f"{DYNMAP_URL}/up/world/{WORLD_NAME}/"
 
     log(f"dynmap={DYNMAP_URL}  server={MC_HOST}:{MC_PORT}  map_type={MAP_TYPE or '(all)'}")
@@ -203,6 +212,8 @@ def main():
                     name = u.get("name", "")
                     if MAP_TYPE and not name.startswith(MAP_TYPE + "/"):
                         continue
+                    if name.rsplit("/", 1)[-1].startswith("z"):
+                        continue  # skip zoomed-out duplicates, keep only native tiles
                     tile_ts = u.get("timestamp")
                     tile_url = f"{DYNMAP_URL}/tiles/{WORLD_NAME}/{name}"
                     append(CHUNKS_LOG, {"time": now(), "tile": tile_url, "tile_ts": tile_ts})
@@ -216,12 +227,12 @@ def main():
                 log(f"dynmap poll error: {reason}")
                 record_error(CHUNKS_LOG, reason)
 
-            # ---- player count from the Minecraft server itself ----
+            # ---- player count + list from the Minecraft server itself ----
             try:
-                count = ping_player_count(MC_HOST, MC_PORT)
-                if count != last_count:
-                    append(PLAYERS_LOG, {"time": now(), "count": count})
-                    last_count = count
+                count, players = ping_players(MC_HOST, MC_PORT)
+                if (count, players) != last_players:
+                    append(PLAYERS_LOG, {"time": now(), "count": count, "players": players})
+                    last_players = (count, players)
             except Exception as e:
                 reason = error_reason(e)
                 log(f"player ping error: {reason}")
