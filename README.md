@@ -23,7 +23,9 @@ Runs from a prebuilt image on GitHub Container Registry. It logs two sources to 
 
 ### Run with Docker
 
-Make an empty folder and drop in two files:
+(Make sure docker is on your system first, for windows download and start [Docker Desktop](https://docs.docker.com/desktop/setup/install/windows-install/#advanced-system-configuration-and-installation-options))
+
+Make an empty folder and drop in two new files:
 
 `docker-compose.yml`
 ```yaml
@@ -48,7 +50,7 @@ MC_HOST=your-server
 MC_PORT=25565
 ```
 
-Then start it:
+Then open a terminal and start it with the following command:
 ```bash
 docker compose up -d
 ```
