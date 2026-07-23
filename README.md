@@ -14,11 +14,16 @@ Currently two versions depending on your need:
 
 Runs from a prebuilt image on GitHub Container Registry. It logs two sources to a local `./data` folder:
 
-- `players.jsonl` Online player count and name list from the Minecraft server directly
-  (Server List Ping), one line each time it changes. Dynmap can hide players, so this is read
-  from the game server instead of Dynmap.
-- `chunks.jsonl` Every changed map tile (chunk) from Dynmap, as a full tile URL with a timestamp.
-  Only native (full-detail) tiles are logged; Dynmap's zoomed-out duplicates are skipped.
+- `players.csv` Online player count from the Minecraft server directly (Server List Ping),
+  logged only when it changes. Dynmap can hide players, so this is read from the game server
+  instead of Dynmap. One row per online player (same time/count repeated per row) rather than
+  a name list, so it opens cleanly in Excel/Sheets; a snapshot with nobody online is still one
+  row with count 0.
+- `chunks.csv` Every changed map tile from Dynmap, as a full tile URL. Includes both
+  `time` (when we polled and saw it) and `tile_time` (when the tile actually re-rendered on the
+  server, converted from Dynmap's `tile_ts`). Sort by
+  `tile_time` for the real order changes happened in. Only native (full-detailed 8x8 block) tiles are
+  logged; Dynmap's zoomed-out duplicates are skipped.
 - `chunks/` PNG of each changed tile, only if `SAVE_IMAGES=true` (off by default)
 
 ### Run with Docker

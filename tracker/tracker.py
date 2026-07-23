@@ -3,15 +3,28 @@
 
 Logs two things to a local folder from two sources:
 
-  players.jsonl  - online player count + name list from the Minecraft server itself
-                   (Server List Ping), one line each time it changes. Dynmap can hide
-                   players, so this is read straight from the game server instead.
-  chunks.jsonl   - every changed map tile (chunk) from Dynmap's /up/world feed, as a
-                   full tile URL with a timestamp. Only native (full-detail) tiles are
-                   logged; Dynmap's zoomed-out duplicates are skipped.
+  players.csv    - online player count from the Minecraft server itself (Server List
+                   Ping), logged only when it changes. Dynmap can hide players, so this
+                   is read straight from the game server instead. Normalized to one row
+                   per online player at a given "time" (same count/time repeated per
+                   row) rather than one row holding a name list -- simple tools/Excel
+                   can filter/pivot on "player" directly with no list-parsing. A
+                   snapshot with nobody online is still one row with count=0 and player
+                   blank, so it isn't silently dropped.
+  chunks.csv     - every changed map tile (chunk) from Dynmap's /up/world feed, as a
+                   full tile URL, plus poll errors and start/stop events -- one CSV so
+                   it can be opened straight in Excel/Sheets and sorted there. "time" is
+                   when we observed the row (poll time for tiles and errors, occurrence
+                   time for events). "tile_ts"/"tile_time" is when a tile actually
+                   re-rendered on the server (can lag "time" by up to ~10 minutes) --
+                   sort by tile_time for real historical ordering of chunk changes.
+                   Errors/events deliberately leave tile_time blank: they aren't tile
+                   renders, and a tile stamped mid error could still show up later, so
+                   folding them into the tile_time ordering would be misleading.
   chunks/        - PNG image of each changed tile (only when SAVE_IMAGES=true, these could get quite large)
 """
 
+import csv
 import json
 import os
 import signal
@@ -48,24 +61,52 @@ SAVE_IMAGES = _env("SAVE_IMAGES", "false").lower() in ("1", "true", "yes", "on")
 TIMEOUT     = float(_env("HTTP_TIMEOUT", "8"))
 
 # Name of the log files and directories
-PLAYERS_LOG = OUT / "players.jsonl"
-CHUNKS_LOG  = OUT / "chunks.jsonl"
+PLAYERS_LOG = OUT / "players.csv"
+CHUNKS_LOG  = OUT / "chunks.csv"
 CHUNKS_DIR  = OUT / "chunks"
+
+# chunks.csv columns. tile_time/tile_ts/tile are populated only for tile-change rows;
+# event/error rows carry just "time" (when we observed them) and their own column.
+CHUNK_FIELDS = ["time", "tile_time", "tile_ts", "tile", "event", "error"]
+# players.csv columns. count/player are populated only for snapshot rows (one row per
+# online player, or one blank-player row when count is 0); event/error rows carry just
+# "time" and their own column.
+PLAYERS_FIELDS = ["time", "count", "player", "event", "error"]
 
 def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+def tile_time(tile_ts):
+    # Dynmap's tile_ts (epoch ms) is when the tile actually re-rendered, which can lag
+    # up to ~10 minutes behind the request that surfaced it. Convert it so chunks.csv
+    # carries the real change time, not just the poll time we happened to see it at.
+    if not isinstance(tile_ts, (int, float)):
+        return None
+    return datetime.fromtimestamp(tile_ts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 def log(msg):
     print(f"[tracker] {msg}", flush=True)
 
-def append(path, obj):
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj) + "\n")
+def append_csv(path, fieldnames, row):
+    # CSV (not JSONL) so the logs can be opened straight in Excel/Sheets and sorted
+    # there. newline="" is required by the csv module to avoid extra blank rows.
+    is_new = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if is_new:
+            writer.writeheader()
+        writer.writerow(row)
 
-def record_error(path, reason):
-    # A failed poll is a blind spot where changes could have been missed; mark it
-    # in the affected list so that gap stays visible.
-    append(path, {"time": now(), "error": reason})
+def append_chunk(row):
+    append_csv(CHUNKS_LOG, CHUNK_FIELDS, row)
+
+def record_players(count, players):
+    # One row per online player, all sharing the same capture time -- normalized so a
+    # spreadsheet or simple script never has to parse a name list out of one cell. An
+    # empty roster still gets a single row (player blank) so "nobody online" isn't lost.
+    t = now()
+    for name in players or [""]:
+        append_csv(PLAYERS_LOG, PLAYERS_FIELDS, {"time": t, "count": count, "player": name})
 
 def error_reason(e):
     # Collapse an exception into a short, log-friendly reason string.
@@ -150,11 +191,13 @@ def ping_players(host, port):
 
 def record_event(name):
     # Startup/shutdown markers so on/off periods are visible alongside the data.
-    append(PLAYERS_LOG, {"time": now(), "event": name})
-    append(CHUNKS_LOG, {"time": now(), "event": name})
+    # Only "time" is set -- an event has no count/tile_ts, so the rest stays blank.
+    t = now()
+    append_csv(PLAYERS_LOG, PLAYERS_FIELDS, {"time": t, "event": name})
+    append_csv(CHUNKS_LOG, CHUNK_FIELDS, {"time": t, "event": name})
 
-def last_logged_event(path):
-    # Return the last JSON entry in a log (reading only its tail), or None.
+def last_logged_event(path, fieldnames):
+    # Return the last CSV row in a log (reading only its tail), as a dict, or None.
     if not path.exists():
         return None
     try:
@@ -164,8 +207,11 @@ def last_logged_event(path):
             f.seek(max(0, end - 4096))
             lines = f.read().decode("utf-8", "ignore").splitlines()
         for line in reversed(lines):
-            if line.strip():
-                return json.loads(line)
+            if not line.strip():
+                continue
+            values = next(csv.reader([line]), None)
+            if values and values != fieldnames:  # skip the header if it lands in the tail
+                return dict(zip(fieldnames, values))
     except Exception:
         pass
     return None
@@ -174,7 +220,7 @@ def warn_if_unclean_shutdown():
     # If the previous run never wrote a "tracker stopped" marker it was killed
     # abruptly flag it so the gap is not mistaken
     # for the tracker being off.
-    last = last_logged_event(PLAYERS_LOG)
+    last = last_logged_event(PLAYERS_LOG, PLAYERS_FIELDS)
     if last is not None and last.get("event") != "tracker stopped":
         record_event("warning! tracker closed without warning, end time unknown")
         log("previous run ended without a stop marker (end time unknown)")
@@ -216,7 +262,12 @@ def main():
                         continue  # skip zoomed-out duplicates, keep only native tiles
                     tile_ts = u.get("timestamp")
                     tile_url = f"{DYNMAP_URL}/tiles/{WORLD_NAME}/{name}"
-                    append(CHUNKS_LOG, {"time": now(), "tile": tile_url, "tile_ts": tile_ts})
+                    append_chunk({
+                        "time": now(),
+                        "tile_time": tile_time(tile_ts),
+                        "tile_ts": tile_ts,
+                        "tile": tile_url,
+                    })
                     if SAVE_IMAGES:
                         save_chunk_image(tile_url, name, tile_ts)
 
@@ -225,18 +276,21 @@ def main():
             except Exception as e:
                 reason = error_reason(e)
                 log(f"dynmap poll error: {reason}")
-                record_error(CHUNKS_LOG, reason)
+                # Only "time" (when we hit the error) is set -- no tile_ts to convert,
+                # and a real tile could still land later with a timestamp inside this
+                # gap, so this must not be folded into tile_time ordering.
+                append_chunk({"time": now(), "error": reason})
 
             # ---- player count + list from the Minecraft server itself ----
             try:
                 count, players = ping_players(MC_HOST, MC_PORT)
                 if (count, players) != last_players:
-                    append(PLAYERS_LOG, {"time": now(), "count": count, "players": players})
+                    record_players(count, players)
                     last_players = (count, players)
             except Exception as e:
                 reason = error_reason(e)
                 log(f"player ping error: {reason}")
-                record_error(PLAYERS_LOG, reason)
+                append_csv(PLAYERS_LOG, PLAYERS_FIELDS, {"time": now(), "error": reason})
 
             time.sleep(POLL)
 
