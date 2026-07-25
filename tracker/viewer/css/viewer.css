@@ -513,26 +513,48 @@ kbd {
 
   .brand .sub { display: none; }
   .topbar { gap: 8px; padding: 6px 8px; }
-  /* Touch targets get bigger; the transport row scrolls rather than wrapping
-     into three lines and eating the map. */
-  .dock__bar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
-  .dock__bar::-webkit-scrollbar { display: none; }
+  .dock__bar { flex-wrap: wrap; row-gap: 6px; padding: 6px 8px; }
   .dock__chart canvas { height: 68px; }   /* compact band heights */
   .btn { min-height: 34px; padding: 6px 10px; }
   .stats { grid-template-columns: 1fr 1fr; }
   .tip { max-width: 200px; }
+
+  /* The date inputs are flex children with width:100%/min-width:0, so in the
+     dock they collapsed to a couple of characters and wrapped one letter per
+     line. They live in the Controls panel on mobile instead, full width. */
+  #rangeBar { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+  #rangeBar input[type="datetime-local"] { grid-column: 1 / -1; width: 100%; }
+  #rangeBar select { width: 100%; }
+
+  /* The clock must not push the transport controls off screen. */
+  .dock__time { font-size: 11.5px; padding: 0; }
+  .stage__badge { font-size: 10px; padding: 4px 6px; line-height: 1.45; }
+  .stage__overlay { top: 6px; left: 6px; right: 44px; gap: 4px; }
 }
 
+/* Desktop keeps the range controls inline in the dock. */
+.rangebar { display: flex; align-items: center; gap: 6px; }
+.rangebar input[type="datetime-local"] { width: 172px; }
+.rangebar select { width: auto; }
+
 @media (max-width: 900px) and (orientation: landscape) {
-  /* Landscape phones have almost no vertical room and plenty of width, so every
-     rule here buys height back for the map by tightening chrome horizontally
-     instead. Touch targets stay at 38px, which is still above the 34px the rest
-     of the mobile layout uses. */
-  .topbar { min-height: 38px; padding: 4px 8px; }
+  /* A landscape phone has ~375px of height for everything. Chrome that is merely
+     tight in portrait swallows the map here, so this block spends the surplus
+     WIDTH to buy height back: one non-wrapping transport row, shorter timeline
+     bands, no axis strip. Touch targets stay at 34-38px. */
+  .topbar { min-height: 34px; padding: 3px 8px; }
+  .brand h1 { font-size: 13px; }
   .dock__axis { display: none; }
-  .dock__bar { padding: 4px 8px; }
-  .mtabs button { min-height: 38px; padding: 4px 2px 5px; font-size: 9.5px; flex-direction: row; gap: 5px; }
+  .dock__bar { padding: 3px 6px; gap: 4px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .dock__bar::-webkit-scrollbar { display: none; }
+  .dock__chart canvas { height: 58px; }   /* tight band heights */
+  .btn { min-height: 34px; padding: 5px 8px; }
+  .btn--icon { padding: 5px 6px; }
+  .mtabs button { min-height: 34px; padding: 3px 2px 4px; font-size: 9.5px; flex-direction: row; gap: 5px; }
   .mtabs button span.ico { font-size: 13px; }
+  .stage__overlay { top: 4px; left: 4px; }
+  .stage__badge { font-size: 9.5px; }
+  .stage__tools { bottom: 4px; right: 4px; gap: 3px; }
 }
 
 .only-mobile { display: none; }

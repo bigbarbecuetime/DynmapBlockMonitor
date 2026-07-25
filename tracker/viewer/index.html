@@ -152,6 +152,13 @@
       </div>
     </details>
 
+    <!-- On small screens the time-range controls are moved in here, where they
+         have room to be full width instead of being crushed in the dock. -->
+    <details class="group" id="rangeGroup" open hidden>
+      <summary>Time range</summary>
+      <div class="group__body" id="rangeHost"></div>
+    </details>
+
     <details class="group">
       <summary>Keyboard</summary>
       <div class="group__body">
@@ -254,7 +261,7 @@
 
   <!-- --------------------------------------------------------------- dock -->
   <section class="dock" id="dock">
-    <div class="dock__bar">
+    <div class="dock__bar" id="dockBar">
       <button class="btn btn--icon" id="toStart" title="Window start (Home)">&#9198;</button>
       <button class="btn btn--icon" id="stepBack" title="Previous data point (Left arrow)">&#9194;</button>
       <button class="btn btn--icon" id="playBtn" title="Play / pause (Space)">&#9205;</button>
@@ -272,18 +279,22 @@
 
       <label class="chk only-desktop" style="margin:0"><input type="checkbox" id="loopChk" checked> Loop</label>
 
-      <input type="datetime-local" id="rangeFrom" step="1" title="Window start" style="width:172px">
-      <input type="datetime-local" id="rangeTo" step="1" title="Window end" style="width:172px">
-      <button class="btn" id="rangeAll" title="Select the whole file">All</button>
-      <select id="rangePreset" title="Window length ending at the cursor" style="width:auto">
-        <option value="">Length&hellip;</option>
-        <option value="60">1 minute</option>
-        <option value="300">5 minutes</option>
-        <option value="900">15 minutes</option>
-        <option value="3600">1 hour</option>
-        <option value="21600">6 hours</option>
-        <option value="86400">24 hours</option>
-      </select>
+      <!-- Relocated into the Controls panel on small screens (see relocateRangeBar
+           in app.js). Left inline here on desktop, where there is room for it. -->
+      <div class="rangebar" id="rangeBar">
+        <input type="datetime-local" id="rangeFrom" step="1" title="Window start">
+        <input type="datetime-local" id="rangeTo" step="1" title="Window end">
+        <button class="btn" id="rangeAll" title="Select the whole file">All</button>
+        <select id="rangePreset" title="Window length ending at the cursor">
+          <option value="">Length&hellip;</option>
+          <option value="60">1 minute</option>
+          <option value="300">5 minutes</option>
+          <option value="900">15 minutes</option>
+          <option value="3600">1 hour</option>
+          <option value="21600">6 hours</option>
+          <option value="86400">24 hours</option>
+        </select>
+      </div>
     </div>
 
     <div class="dock__chart">

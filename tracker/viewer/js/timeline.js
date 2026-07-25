@@ -33,7 +33,7 @@ window.DV = window.DV || {};
       viewInit: false,        // has the view ever been framed to real data?
       t0: 0, t1: 1,           // the selected analysis window
       cursor: 0,
-      compact: false,
+      density: "normal",   // normal | compact | tight
       hoverX: null
     };
 
@@ -50,10 +50,14 @@ window.DV = window.DV || {};
       };
     }
 
+    /* Three densities, matching the three canvas heights stated in viewer.css:
+       96px desktop, 68px mobile portrait, 58px mobile landscape -- where a phone
+       has only ~375px of height for the entire page and every row the chrome
+       takes is a row the map loses. */
     function heights() {
-      return st.compact
-        ? { ov: 12, tiles: 26, players: 24 }
-        : { ov: H_OVERVIEW, tiles: H_TILES, players: H_PLAYERS };
+      if (st.density === "tight") return { ov: 10, tiles: 22, players: 20 };
+      if (st.density === "compact") return { ov: 12, tiles: 26, players: 24 };
+      return { ov: H_OVERVIEW, tiles: H_TILES, players: H_PLAYERS };
     }
 
     function totalHeight() {
@@ -589,7 +593,7 @@ window.DV = window.DV || {};
       },
       view: function () { return { a: st.viewA, b: st.viewB }; },
       setCursor: function (ms) { st.cursor = ms; invalidate(); },
-      setCompact: function (v) { st.compact = !!v; invalidate(); },
+      setDensity: function (d) { st.density = d; invalidate(); },
       refreshPalette: function () { pal = palette(); invalidate(); },
       redraw: invalidate, flush: flush,
       height: totalHeight,

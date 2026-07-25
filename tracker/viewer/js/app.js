@@ -751,9 +751,31 @@
     else { showDrop(); updateSourceNote(); }
   }
 
+  /* Layout density follows the same breakpoints the stylesheet uses. Landscape
+     phones get the tightest treatment: with ~375px of height for the whole page,
+     chrome that is merely snug in portrait leaves the map with almost nothing. */
   function applyCompact() {
     var mobile = window.matchMedia("(max-width: 900px)").matches;
-    timeline.setCompact(mobile);
+    var landscape = mobile && window.matchMedia("(orientation: landscape)").matches;
+    timeline.setDensity(landscape ? "tight" : mobile ? "compact" : "normal");
+    relocateRangeBar(mobile);
+  }
+
+  /* The date inputs are unusable squeezed into the dock on a phone -- as flex
+     children they collapse to a couple of characters wide and wrap one letter per
+     line. Move the whole group into the Controls panel instead, where it can be
+     full width. Moved rather than duplicated so there is only ever one #rangeFrom
+     and the handlers bound in bindControls() stay attached. */
+  function relocateRangeBar(mobile) {
+    var bar = $("rangeBar"), group = $("rangeGroup"), host = $("rangeHost");
+    if (!bar) return;
+    if (mobile && bar.parentNode !== host) {
+      host.appendChild(bar);
+      group.hidden = false;
+    } else if (!mobile && bar.parentNode === host) {
+      $("dockBar").appendChild(bar);
+      group.hidden = true;
+    }
   }
 
   function syncViewUI(s) {
