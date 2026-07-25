@@ -207,6 +207,13 @@ linking hops across the disc and inflated speed to 3.8–8.5 blocks/s, while
 centroids give 2.2 median / 3.3 p90 — matching the 2.2 measured directly from
 the solo stretches.
 
+Attribution has two tiers. A track whose every moment had exactly one player
+online is **confidently** theirs. Otherwise, a track that starts within a few
+minutes of exactly one join is tagged with that joiner — measured on the
+calibration session, loads first appeared 51s and 73s after the two joins — with
+each join spawning at most one track, the name checked against the roster, and
+the result marked uncertain.
+
 Linking is by proximity in space and time, never by the order tiles arrive: tiles
 come off the feed sorted by ascending x (perfectly ascending in **92%** of polls
 *within a single second*, where time cannot explain it), so emission order

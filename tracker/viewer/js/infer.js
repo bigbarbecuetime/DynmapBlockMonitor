@@ -536,9 +536,39 @@ window.DV = window.DV || {};
       tr.player = (soloAll && tr.candidates.length === 1) ? tr.candidates[0] : null;
       tr.confident = !!tr.player;
     });
+    /* SECOND TIER: attribution by timing. A player's loads start shortly after
+       they join -- measured on the calibration session, the first cluster load
+       came 51s and 73s after the two joins -- so a track that begins inside a
+       few minutes of exactly one join very probably belongs to that joiner.
+       Each join can spawn only one track (consumed in start order), the name
+       must actually appear in the track's roster window, and the result is
+       marked uncertain: timing is evidence, not proof. */
+    tracks.sort(function (a, b) { return a.startMs - b.startMs; });
+    var joins = (model.transitions || []).filter(function (t) { return t.type === "join"; });
+    var usedJoin = new Set();
+    tracks.forEach(function (tr) {
+      if (tr.player) return;
+      var cands = [];
+      for (var j = 0; j < joins.length; j++) {
+        if (usedJoin.has(j)) continue;
+        var J = joins[j];
+        // start may precede the join by up to half a slice (midpoint timestamps)
+        if (tr.startMs >= J.ms - sliceMs * 0.75 && tr.startMs <= J.ms + 240000 &&
+            tr.candidates.indexOf(J.player) >= 0) {
+          cands.push(j);
+        }
+      }
+      if (cands.length === 1) {
+        usedJoin.add(cands[0]);
+        tr.player = joins[cands[0]].player;
+        tr.confident = false;
+        tr.attribution = "join-timing (+" +
+          Math.max(0, Math.round((tr.startMs - joins[cands[0]].ms) / 1000)) + "s after their join)";
+      }
+    });
+
     // Label every leg and lift the impossible ones out as events.
     tracks.forEach(function (tr) { annotateTrack(tr, model, opts); });
-    tracks.sort(function (a, b) { return a.startMs - b.startMs; });
     return tracks;
   }
 
