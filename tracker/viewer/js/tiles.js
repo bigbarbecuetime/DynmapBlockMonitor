@@ -81,6 +81,7 @@ window.DV = window.DV || {};
       showRuler: true,
       showMarkers: true,        // Dynmap's marker layer (world border, spawn, ...)
       tileKinds: "all",         // all | edits | loads  -- see the classification note in model.js
+      showTracks: false,        // inferred player tracks (see infer.js)
       // view: grid units (gx = tx, gy = -tz) at centre, plus px-per-tile
       gx: 0, gy: 0, scale: 6,
       hover: null, selected: null
@@ -94,6 +95,7 @@ window.DV = window.DV || {};
     var urlTemplate = null;      // for tiles that never appear in the CSV
     var sessionStamp = Date.now();  // stable cache-buster; bumped only on demand
     var markers = null;             // Dynmap's marker layer, once fetched
+    var tracks = null;              // inferred player tracks, if built
     var suppressedImages = false;
     var needsDraw = false;
 
@@ -419,7 +421,8 @@ window.DV = window.DV || {};
         }
       }
 
-      /* --- server-published markers (world border, spawn) --------------- */
+      /* --- inferred tracks, then server-published markers ---------------- */
+      drawTracks();
       drawMarkers();
 
       /* --- selection + hover ------------------------------------------- */
@@ -427,6 +430,54 @@ window.DV = window.DV || {};
       if (state.hover) outline(state.hover, pal.text1, 1);
 
       if (state.showRuler) drawRuler(vis);
+    }
+
+    /* ----------------------------------------------------- track layer ---- */
+
+    /* Tracks are drawn as a path through the chunk loads that were linked
+       together, brightest at the head so direction of travel is visible. Colour
+       is per track, from the categorical slots, so two tracks crossing stay
+       distinguishable. */
+    var TRACK_HUES = ["--series-players", "--series-tiles", "--series-3",
+                      "--status-good", "--status-warning", "--status-critical"];
+
+    function drawTracks() {
+      if (!tracks || !state.showTracks || !tracks.length) return;
+      var cs = getComputedStyle(canvas);
+      ctx.save();
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      for (var i = 0; i < tracks.length; i++) {
+        var tr = tracks[i];
+        if (tr.lastMs < state.t0 || tr.startMs > state.cursor) continue;
+        var col = cs.getPropertyValue(TRACK_HUES[i % TRACK_HUES.length]).trim();
+        var pts = tr.points.filter(function (p) { return p.ms <= state.cursor; });
+        if (pts.length < 2) continue;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = tr.confident ? 0.9 : 0.5;   // unattributed tracks recede
+        ctx.beginPath();
+        for (var j = 0; j < pts.length; j++) {
+          var c = cellRect(pts[j].tx, pts[j].tz);
+          var x = c.x + c.s / 2, y = c.y + c.s / 2;
+          if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        // head of the track = where it got to
+        var last = cellRect(pts[pts.length - 1].tx, pts[pts.length - 1].tz);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        ctx.arc(last.x + last.s / 2, last.y + last.s / 2, 4, 0, 6.2832);
+        ctx.fill();
+        if (tr.player && state.scale >= 1.5) {
+          ctx.font = "10px system-ui, -apple-system, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillStyle = pal.text1;
+          ctx.fillText(tr.player, last.x + last.s / 2, last.y + last.s / 2 - 8);
+        }
+      }
+      ctx.restore();
     }
 
     /* ---------------------------------------------------- marker layer ---- */
@@ -795,6 +846,7 @@ window.DV = window.DV || {};
       get: function (k) { return state[k]; },
       setHistorical: function (set) { historical = set; images.clear(); invalidate(); },
       setMarkers: function (data) { markers = data; invalidate(); },
+      setTracks: function (t) { tracks = t; invalidate(); },
       markerSummary: function () {
         if (!markers || !markers.sets) return null;
         var areas = 0, points = 0, lines = 0, circles = 0, border = null;

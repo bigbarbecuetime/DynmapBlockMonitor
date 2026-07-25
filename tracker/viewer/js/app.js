@@ -25,6 +25,8 @@
     corrWindowMs: 60000,
     dataBase: "../data",
     mapType: null,           // null = let the model pick the most-logged type
+    mapConfigs: null,        // per-map projection matrices, for height inference
+    tracks: null, trackScore: null,
     parseCache: {},          // memoised row parse, reused across rebuilds
     live: false, livePollMs: 5000, liveTimer: 0,
     tailChunks: null, tailPlayers: null,
@@ -45,7 +47,7 @@
         mode: map.get("mode"), heatMetric: map.get("heatMetric"), heatScale: map.get("heatScale"),
         halfLifeMs: map.get("halfLifeMs"), imageSource: map.get("imageSource"),
         fillContext: map.get("fillContext"), showGrid: map.get("showGrid"), showRuler: map.get("showRuler"),
-        showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"),
+        showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"), showTracks: map.get("showTracks"),
         skewOverride: state.skewOverride, blocksPerTile: state.blocksPerTile, mapType: state.mapType,
         corrWindowMs: state.corrWindowMs, dataBase: state.dataBase, livePollMs: state.livePollMs,
         theme: document.documentElement.getAttribute("data-theme") || "",
@@ -164,6 +166,7 @@
         return probeHistorical(base);
       })
       .then(loadMarkers)
+      .then(loadMapConfig)
       .then(function () { return true; })          // loaded and drawn
       .catch(function (e) {
         if (e === HANDLED) return false;
@@ -222,6 +225,25 @@
         state.markerError = e.message || String(e);
       })
       .then(updateSourceNote);
+  }
+
+  /* Each map type's worldtomap matrix, which is what lets a flat tile and an
+     isometric tile together pin down height. Same CORS hop as the markers. */
+  function loadMapConfig() {
+    var m = state.model;
+    if (!m || !m.tiles.length) return Promise.resolve();
+    return fetch("/api/config", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("unavailable")); })
+      .then(function (cfg) {
+        var world = (cfg.worlds || []).filter(function (w) { return w.name === m.tiles[0].world; })[0];
+        if (!world) throw new Error("world not in configuration");
+        var byPrefix = {};
+        (world.maps || []).forEach(function (mp) { byPrefix[mp.prefix] = mp; });
+        state.mapConfigs = byPrefix;
+        state.worldCenter = world.center;
+      })
+      .catch(function () { state.mapConfigs = null; })
+      .then(function () { renderSlow(); });
   }
 
   function readFile(file) {
@@ -391,7 +413,22 @@
     // --- model-only: lifecycle events and the quality report
     if (m !== lastModelRendered) {
       lastModelRendered = m;
-      P.renderQuality($("qualityPanel"), m);
+      // Tracks: only built when asked for -- linking is O(tiles) and pointless
+    // unless the layer or the panel is actually being looked at.
+    if (map.get("showTracks")) {
+      state.tracks = DV.infer.buildTracks(m, { maxGapMs: 60000, maxDist: 32, from: w.t0, to: w.t1 });
+      state.trackScore = DV.infer.scoreTracks(m, state.tracks, { from: w.t0, to: w.t1 });
+      map.setTracks(state.tracks);
+    } else {
+      state.tracks = null; state.trackScore = null; map.setTracks(null);
+    }
+    P.renderTracks($("tracksPanel"), state.tracks, state.trackScore, m, function (tr) {
+      map.centerOn(tr.points[0].tx, tr.points[0].tz, Math.max(map.view().scale, 4));
+      seek(tr.startMs);
+    });
+    $("trackCount").textContent = state.tracks ? state.tracks.length + " found" : "";
+
+    P.renderQuality($("qualityPanel"), m);
       $("qualityCount").textContent = m.quality.length ? m.quality.length + " notes" : "";
       P.renderEvents($("eventFeed"), m, seek);
     }
@@ -415,7 +452,11 @@
       map.centerOn(r.tx, r.tz, Math.max(map.view().scale, 14));
       selectTile(map.describe(r.tx, r.tz));
     });
-    if (selected) P.renderTileDetail($("tilePanel"), map.describe(selected.tx, selected.tz), m, c, seek);
+    if (selected) {
+      var info = map.describe(selected.tx, selected.tz);
+      attachHeight(info, m);
+      P.renderTileDetail($("tilePanel"), info, m, c, seek);
+    }
 
     renderHeatLegend();
     syncRangeInputs();
@@ -563,9 +604,27 @@
   }
 
   var selected = null;
+
+  /* Cross this tile's changes against isometric tiles logged at the same moment
+     to recover a height band. Only possible when more than one map type is being
+     logged; the panel says so when it is not. */
+  function attachHeight(info, m) {
+    if (!info || !m) return;
+    info.heightUnavailable = !state.mapConfigs || m.mapTypes.length < 2;
+    if (info.heightUnavailable || !info.events.length) return;
+    var res = DV.infer.inferHeights(
+      { allTiles: m.allTiles, tiles: info.events, mapType: m.mapType, blocksPerTile: m.blocksPerTile },
+      state.mapConfigs, { tolMs: 2000 });
+    var best = null;
+    res.bands.forEach(function (b) {
+      if (!best || b.yMax - b.yMin < best.yMax - best.yMin) best = b;
+    });
+    info.height = best;
+  }
   function selectTile(info) {
     selected = info ? { tx: info.tx, tz: info.tz } : null;
     $("tileGroup").open = true;
+    attachHeight(info, state.model);
     P.renderTileDetail($("tilePanel"), info, state.model, transport.cursor, seek);
   }
 
@@ -697,7 +756,8 @@
       showGrid: s.showGrid !== false,
       showRuler: s.showRuler !== false,
       showMarkers: s.showMarkers !== false,
-      tileKinds: s.tileKinds || "all"
+      tileKinds: s.tileKinds || "all",
+      showTracks: !!s.showTracks
     });
     if (typeof s.speedIdx === "number") transport.setSpeedIndex(s.speedIdx);
     if (s.loop === false) transport.setLoop(false);
@@ -794,6 +854,7 @@
     $("showRuler").checked = map.get("showRuler");
     $("showMarkers").checked = map.get("showMarkers");
     $("tileKinds").value = map.get("tileKinds");
+    $("showTracks").checked = map.get("showTracks");
     $("halfLife").value = Math.round(map.get("halfLifeMs") / 1000);
     $("halfLifeVal").textContent = M.fmtDur(map.get("halfLifeMs"));
     $("halfLifeRow").hidden = map.get("heatMetric") !== "recency";
@@ -928,6 +989,10 @@
     $("showGrid").addEventListener("change", function () { map.set({ showGrid: this.checked }); saveSettings(); });
     $("showRuler").addEventListener("change", function () { map.set({ showRuler: this.checked }); saveSettings(); });
     $("showMarkers").addEventListener("change", function () { map.set({ showMarkers: this.checked }); saveSettings(); });
+    $("showTracks").addEventListener("change", function () {
+      map.set({ showTracks: this.checked });
+      invalidatePanels(); renderSlow(); saveSettings();
+    });
 
     $("fitBtn").addEventListener("click", function () { map.fit(); });
     $("fitBtn2").addEventListener("click", function () { map.fit(); });

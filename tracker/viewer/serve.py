@@ -77,6 +77,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self.api_images()
         if path == "/api/markers":
             return self.api_markers()
+        if path == "/api/config":
+            # Same CORS problem as the markers, same fixed-host mitigation. This
+            # carries each map type's worldtomap matrix, which is what lets the
+            # viewer combine a flat tile with an isometric one to recover height.
+            return self.api_proxy("/up/configuration")
         if path == "/":
             self.send_response(HTTPStatus.FOUND)
             self.send_header("Location", "/viewer/")
@@ -189,12 +194,19 @@ class Handler(SimpleHTTPRequestHandler):
         if not WORLD_RE.match(world):
             return self._json_error(HTTPStatus.BAD_REQUEST, "bad or missing 'world'")
 
+        return self.api_proxy("/tiles/_markers_/marker_%s.json" % world)
+
+    def api_proxy(self, suffix):
+        """Fetch a fixed path from the configured Dynmap and pass it through.
+
+        The caller never supplies the host -- only whatever the calling method has
+        already validated goes into `suffix` -- so this cannot be aimed elsewhere.
+        """
         base = dynmap_url()
         if not base:
             return self._json_error(HTTPStatus.SERVICE_UNAVAILABLE,
-                                    "DYNMAP_URL is not set (env or tracker/.env), so markers cannot be fetched")
-
-        url = "%s/tiles/_markers_/marker_%s.json" % (base, world)
+                                    "DYNMAP_URL is not set (env or tracker/.env)")
+        url = base + suffix
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "dynmap-viewer"})
             with urllib.request.urlopen(req, timeout=8) as r:

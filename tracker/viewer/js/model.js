@@ -194,7 +194,14 @@ window.DV = window.DV || {};
       chunkSrc: chunkRows, playerSrc: playerRows,
       chunkSeen: 0, playerSeen: 0,
       allTiles: [], chunkErrors: [], lifecycle: [], playerErrors: [],
-      snapByTime: new Map(), snapshots: [], mapCounts: new Map()
+      snapByTime: new Map(), snapshots: [], mapCounts: new Map(),
+      /* (tile URL + tile_ts) already seen. tile_ts IS the moment the tile
+         rendered, so the same pair twice is necessarily the same event recorded
+         twice -- which happens if two tracker instances ever write to one folder
+         (easy to do by accident: renaming a compose project orphans the old
+         containers, leaving them running). Counting it twice would inflate the
+         heatmap, so drop the repeat instead of trusting the file. */
+      seenTiles: new Set(), duplicates: 0
     };
   }
 
@@ -229,6 +236,9 @@ window.DV = window.DV || {};
       if (!info) continue;
       var rawTileMs = r.tile_ts ? Number(r.tile_ts) : parseMs(r.tile_time);
       if (!isFinite(rawTileMs)) rawTileMs = capMs;
+      var dedupKey = r.tile + "|" + rawTileMs;
+      if (C.seenTiles.has(dedupKey)) { C.duplicates++; continue; }
+      C.seenTiles.add(dedupKey);
       mapCounts.set(info.map, (mapCounts.get(info.map) || 0) + 1);
       allTiles.push({
         capMs: capMs, rawTileMs: rawTileMs, url: r.tile,
@@ -661,7 +671,9 @@ window.DV = window.DV || {};
       events: events, coverage: coverage, steps: steps, bounds: bounds, stats: stats,
       neighbourMs: neighbourMs,
       blocksPerTile: bpt, retentionMs: retention,
-      mapType: mapType, mapTypes: mapTypes, tilesAllMaps: allTiles.length,
+      mapType: mapType, mapTypes: mapTypes, tilesAllMaps: allTiles.length, duplicatesDropped: C.duplicates,
+      // every map type, unfiltered -- infer.js needs the isometric ones for height
+      allTiles: allTiles,
       pollMs: pollMs, playerPollMs: playerPollMs, playerChangeMs: playerChangeMs,
       skew: { ms: skewMs, estimatedMs: estimated, overridden: manual,
               perRun: Array.from(runSkew.entries()).map(function (e) { return { run: e[0], ms: e[1] }; }),
@@ -759,6 +771,12 @@ window.DV = window.DV || {};
   function assess(m) {
     var q = [];
     var s = m.skew;
+
+    if (m.duplicatesDropped) {
+      q.push({ severity: "warning", code: "duplicate-rows",
+        title: m.duplicatesDropped.toLocaleString() + " duplicated row" + (m.duplicatesDropped > 1 ? "s" : "") + " ignored",
+        detail: "The same map change was recorded more than once, which means two trackers were writing to this folder at the same time. They are counted once here, so the map is right -- but the file itself has repeats, and whichever tracker you did not mean to run should be stopped." });
+    }
 
     if (m.mapTypes.length > 1) {
       q.push({ severity: "warning", code: "multiple-map-types",

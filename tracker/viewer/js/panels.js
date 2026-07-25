@@ -258,6 +258,16 @@ window.DV = window.DV || {};
         notes.push(q("warning", "⚠", uncovered + " change" + (uncovered > 1 ? "s" : "") + " landed outside a tracker run",
           "Their timing is less certain; expected right at a start or stop."));
       }
+      /* Height, when the isometric maps were also logged. A flat tile alone
+         cannot say how high up a change was -- it is a top-down projection. */
+      if (info.height) {
+        notes.push(q("good", "✓", "Height about y " + Math.round(info.height.yMin) + " to " + Math.round(info.height.yMax),
+          "Recovered by pairing this flat tile with " + info.height.sources +
+          " isometric tile change(s) at the same moment: the isometric projection folds height into its vertical axis, so it supplies the Y that an overhead tile cannot." ));
+      } else if (info.heightUnavailable) {
+        notes.push(q("info", "○", "Height unknown",
+          "Only one map type is logged, so there is no second projection to cross with. Set <code>MAP_TYPE=</code> (empty) in the tracker's .env to record the isometric maps too."));
+      }
       notes.forEach(function (h) { root.appendChild(el(h)); });
     }
 
@@ -437,7 +447,54 @@ window.DV = window.DV || {};
     });
   }
 
+  /* ------------------------------------------------------------- tracks --- */
+
+  /* Inferred paths, with the honesty up front: the score line says how often the
+     number of live tracks matched the number of people actually online, which is
+     the only external check available. */
+  function renderTracks(root, tracks, score, model, onPick) {
+    root.innerHTML = "";
+    if (!tracks) { root.innerHTML = '<div class="empty">Enable "Inferred player tracks" to build these.</div>'; return; }
+    if (!tracks.length) { root.innerHTML = '<div class="empty">No tracks in this window.</div>'; return; }
+
+    var named = tracks.filter(function (t) { return t.player; }).length;
+    root.appendChild(el('<div class="stats">' +
+      stat("Tracks", String(tracks.length), named + " attributable") +
+      stat("Match roster", score ? Math.round(score.exact * 100) + "%" : "&mdash;",
+           score ? "off by " + score.meanAbsErr.toFixed(2) + " on average" : "") +
+      "</div>"));
+
+    if (score) {
+      root.appendChild(el(q("info", "○", "Idle players are invisible here",
+        "A track is built from chunks loading, which only happens when someone MOVES. " +
+        "Standing still produces nothing, which is why the count runs under the roster " +
+        Math.round(score.underCount * 100) + "% of the time rather than over it.")));
+    }
+
+    var t = document.createElement("table");
+    t.className = "tbl";
+    t.innerHTML = "<thead><tr><th>Start</th><th>For</th><th class=num>Blocks</th><th class=num>b/s</th><th>Who</th></tr></thead>";
+    var tb = document.createElement("tbody");
+    tracks.slice().sort(function (a, b) { return b.points.length - a.points.length; }).slice(0, 40).forEach(function (tr) {
+      var row = document.createElement("tr");
+      row.style.cursor = "pointer";
+      row.innerHTML = "<td class=ts>" + M.fmtTime(tr.startMs) + "</td>" +
+        "<td>" + M.fmtDur(tr.durationMs) + "</td>" +
+        "<td class=num>" + tr.blocksTravelled.toLocaleString() + "</td>" +
+        "<td class=num>" + tr.speedBlocksPerSec.toFixed(1) + "</td>" +
+        "<td>" + (tr.player ? esc(tr.player)
+                 : '<span style="opacity:.65">' + (tr.candidates.length ? esc(tr.candidates.slice(0, 2).join(" / ")) : "unknown") + "</span>") + "</td>";
+      row.title = tr.confident ? "Only this player was online for the whole track"
+                               : "More than one player was online, so this cannot be pinned to one of them";
+      row.addEventListener("click", function () { if (onPick) onPick(tr); });
+      tb.appendChild(row);
+    });
+    t.appendChild(tb);
+    root.appendChild(t);
+  }
+
   DV.panels = {
+    renderTracks: renderTracks,
     renderNow: renderNow,
     renderTransitions: renderTransitions,
     renderSnapshotTable: renderSnapshotTable,

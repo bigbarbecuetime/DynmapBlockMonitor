@@ -137,6 +137,35 @@ poll. Outage length is counted as **consecutive failed polls** — it cannot be 
 off the gaps between logged tiles, since a poll that succeeds with nothing changed
 writes no row at all.
 
+## Beyond plotting
+
+**Player tracks** link chunk loads into paths. Dynmap redraws a chunk when it is
+loaded, which is what happens as someone walks into new terrain, so loads are the
+movement signal — and the load/edit split above separates them from building.
+Linking is by proximity in space and time, never by the order tiles arrive: tiles
+come off the feed sorted by ascending x (perfectly ascending in **92%** of polls
+*within a single second*, where time cannot explain it), so emission order
+measures Dynmap's render loop, not player heading.
+
+The check is the roster: the number of live tracks should match the number of
+people online. It agrees exactly **55%** of the time, mean error 0.75 players,
+and errs low — because a player standing still loads nothing and is invisible
+here. Inferred speeds land at 3.8–8.5 blocks/s, which is walking to boating.
+
+**Height** comes from crossing the maps. A flat tile fixes X and Z but not Y; the
+isometric maps are shot at inclination 30, folding height into their vertical
+axis. With `worldtomap` from `/up/configuration`:
+
+```
+mapY = -5.6569·x + 13.8564·y - 5.6569·z      →  y is the only unknown
+```
+
+Pairing a flat tile with an isometric tile changed at the same moment pins Y to
+about **16 blocks** — verified against spawn, whose published height (88) lands
+inside the recovered band [77.7, 93.5]. Needs `MAP_TYPE=` (empty) so the
+isometric maps are logged too. Bands outside the world's build range are dropped
+rather than reported, since a coincidence in time is not proof of the same event.
+
 ## Tiles are not chunks
 
 Despite the filename, `chunks.csv` logs Dynmap **tiles**. From the server's own
