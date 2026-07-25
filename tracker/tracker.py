@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ultra small Minecraft tracker to get something runnable for now.
+"""Phantom -- a very small Dynmap activity tracker.
 
 Logs two things to a local folder from two sources:
 
@@ -34,6 +34,7 @@ import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -73,8 +74,82 @@ CHUNK_FIELDS = ["time", "tile_time", "tile_ts", "tile", "event", "error"]
 # "time" and their own column.
 PLAYERS_FIELDS = ["time", "count", "player", "event", "error"]
 
+# ---- clock alignment ------------------------------------------------------
+#
+# The two timestamps we write come from two different clocks: "time" from this
+# host, "tile_ts" from Dynmap. On the reference host those differed by ~14s --
+# and checking Dynmap's HTTP Date header against Google's and Cloudflare's showed
+# they all agreed with each other, so it was the TRACKER HOST that was slow (its
+# Windows Time service was not running). Every tile therefore looked like it had
+# rendered in the future relative to the poll that found it.
+#
+# Rather than leave the consumer to untangle that, anchor our own clock to the
+# Dynmap server's at startup and write everything on that one clock. The Date
+# header is free -- it comes back on the polls we already make -- and it is what
+# tile_ts is stamped against, which is the whole point.
+#
+# Resolution is 1 second (HTTP dates have no sub-second field) and we halve the
+# round trip, so this is good to about +/-1s: far tighter than the 10s poll and
+# the multi-second render lag it exists to make sense of.
+CLOCK_SYNC  = _env("CLOCK_SYNC", "true").lower() in ("1", "true", "yes", "on")
+# Re-anchor if the host drifts this far from the server afterwards (seconds).
+CLOCK_REANCHOR = float(_env("CLOCK_REANCHOR", "3"))
+
+_clock_offset = 0.0       # seconds to add to this host's clock
+_offset_samples = []      # recent observations, for drift detection
+
+
+def measure_clock_offset(url, samples=3):
+    """Median offset between the server's HTTP Date and this host's clock."""
+    seen = []
+    for _ in range(samples):
+        try:
+            t0 = time.time()
+            req = urllib.request.Request(url, headers={"User-Agent": "dynmap-tracker"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                date = r.headers.get("Date")
+                r.read(1)
+            t1 = time.time()
+            if date:
+                served = parsedate_to_datetime(date).timestamp()
+                seen.append(served - (t0 + t1) / 2.0)   # midpoint cancels the round trip
+        except Exception:
+            pass
+    if not seen:
+        return None
+    seen.sort()
+    return seen[len(seen) // 2]
+
+
+def note_server_date(date_header):
+    """Fold a Date header seen on a normal poll into the drift watch."""
+    global _clock_offset
+    if not CLOCK_SYNC or not date_header:
+        return None
+    try:
+        served = parsedate_to_datetime(date_header).timestamp()
+    except Exception:
+        return None
+    _offset_samples.append(served - time.time() - _clock_offset)
+    if len(_offset_samples) > 30:
+        _offset_samples.pop(0)
+    # Only act on a sustained disagreement, never a single sample: Date is
+    # second-resolution, so isolated +/-1s readings are expected noise.
+    if len(_offset_samples) < 10:
+        return None
+    ordered = sorted(_offset_samples)
+    drift = ordered[len(ordered) // 2]
+    if abs(drift) < CLOCK_REANCHOR:
+        return None
+    _clock_offset += drift
+    _offset_samples.clear()
+    return drift
+
+
 def now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Everything the tracker writes goes through here, so one offset puts the
+    # whole log -- players.csv included -- on the same clock as tile_ts.
+    return datetime.fromtimestamp(time.time() + _clock_offset, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def tile_time(tile_ts):
     # Dynmap's tile_ts (epoch ms) is when the tile actually re-rendered, which can lag
@@ -121,6 +196,11 @@ def error_reason(e):
 def fetch_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "dynmap-tracker"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        # Watch the clock on every poll we were making anyway -- no extra request.
+        drift = note_server_date(r.headers.get("Date"))
+        if drift is not None:
+            log(f"clock drifted {drift:+.1f}s against the server; re-anchored")
+            append_chunk({"time": now(), "event": f"clock re-anchored {drift:+.1f}s"})
         return json.loads(r.read().decode("utf-8"))
 
 def save_chunk_image(url, name, tile_ts):
@@ -233,11 +313,24 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     signal.signal(signal.SIGTERM, _stop)
 
+    # Put our clock on the server's before writing anything, so "time" and
+    # "tile_ts" in the same row are comparable and the log needs no correction
+    # after the fact.
+    global _clock_offset
+    if CLOCK_SYNC:
+        measured = measure_clock_offset(f"{DYNMAP_URL}/up/configuration")
+        if measured is None:
+            log("clock sync: could not read a Date header; using this host's clock as-is")
+        else:
+            _clock_offset = measured
+            log(f"clock sync: this host is {-measured:+.1f}s off the Dynmap server; "
+                f"timestamps shifted by {measured:+.1f}s")
+
     # If the previous run never recorded a stop, warn before marking this startup.
     warn_if_unclean_shutdown()
 
     # Mark startup in both lists so on/off gaps are distinguishable from live data.
-    record_event("tracker starting")
+    record_event("tracker starting" + (f" (clock {_clock_offset:+.1f}s)" if CLOCK_SYNC and _clock_offset else ""))
 
     last_ts = 0
     last_players = None

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Dynmap tracker viewer</title>
+<title>Phantom</title>
 <link rel="stylesheet" href="css/viewer.css">
 </head>
 <body>
@@ -13,8 +13,8 @@
   <!-- ------------------------------------------------------------- top bar -->
   <header class="topbar">
     <div class="brand">
-      <h1>Tracker viewer</h1>
-      <span class="sub">chunks.csv + players.csv</span>
+      <h1>Phantom</h1>
+      <span class="sub">dynmap activity tracker</span>
     </div>
 
     <span class="pill" id="statusPill"><span class="pill__dot"></span><span id="statusText">no data</span></span>
@@ -55,11 +55,22 @@
 
         <div class="row">
           <div class="field">
+            <span>Show</span>
+            <select id="tileKinds" title="Chunk loads outnumber real edits about 3:1">
+              <option value="all">All tile changes</option>
+              <option value="edits">Likely block edits only</option>
+              <option value="loads">Likely chunk loads only</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
             <span>Heat measures</span>
             <select id="heatMetric">
-              <option value="count">Change count in window</option>
-              <option value="recency">Recency (decaying)</option>
-              <option value="last">Most recent change</option>
+              <option value="count">Density &mdash; how many changes (blue)</option>
+              <option value="last">Newest &mdash; most recent change (green)</option>
+              <option value="recency">Recency &mdash; decaying (amber)</option>
             </select>
           </div>
         </div>
@@ -229,7 +240,7 @@
     </details>
 
     <details class="group">
-      <summary>Player samples</summary>
+      <summary>Players</summary>
       <div class="group__body" id="snapTable"></div>
     </details>
 

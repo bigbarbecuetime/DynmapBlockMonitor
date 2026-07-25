@@ -39,13 +39,31 @@
   --status-serious: #ec835a;
   --status-critical: #d03b3b;
 
-  /* sequential blue ramp for the heatmap: bin 0 recedes toward the surface */
-  --heat-0: #cde2fb;
-  --heat-1: #9ec5f4;
-  --heat-2: #6da7ec;
-  --heat-3: #3987e5;
+  /* Three single-hue sequential ramps, one per heat measure, so the colour tells
+     you WHICH question the map is answering and two measures are never confused
+     for each other. Each runs white (least / oldest) -> saturated (most / newest),
+     which is the direction asked for. Low bins are drawn at reduced alpha (see
+     BIN_ALPHA in tiles.js) so a white low end does not shout on the dark map. */
+  --heat-0: #ffffff;   /* density: white = least dense */
+  --heat-1: #cde2fb;
+  --heat-2: #9ec5f4;
+  --heat-3: #5598e7;
   --heat-4: #256abf;
-  --heat-5: #0d366b;
+  --heat-5: #0d366b;   /* dark blue = densest */
+
+  --newest-0: #ffffff; /* newest: white = oldest */
+  --newest-1: #cdeedd;
+  --newest-2: #94dcb6;
+  --newest-3: #4fc48b;
+  --newest-4: #1f9d63;
+  --newest-5: #0b6e43;  /* green = newest */
+
+  --decay-0: #ffffff;  /* recency: white = fully decayed */
+  --decay-1: #ffe9c2;
+  --decay-2: #ffd08a;
+  --decay-3: #fbae3f;
+  --decay-4: #d98a12;
+  --decay-5: #965c05;  /* amber = hottest */
 
   /* map plane is deliberately its own (darker) surface so tile art reads */
   --map-bg: #eceae4;

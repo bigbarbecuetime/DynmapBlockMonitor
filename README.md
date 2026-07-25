@@ -111,9 +111,9 @@ cp .env.example .env    # then fill it in
 docker compose up --build
 ```
 
-### Viewing the data
+### Phantom viewer
 
-The CSVs open in Excel/Sheets, but [`tracker/viewer/`](tracker/viewer/README.md) is a
+The CSVs open in Excel/Sheets, but **Phantom** ([`tracker/viewer/`](tracker/viewer/README.md)) is a
 dependency-free static page that plots them properly. `docker compose up -d` serves it
 alongside the tracker at <http://127.0.0.1:8080/viewer/> — same image, no extra build.
 
@@ -207,7 +207,7 @@ npm start
 
 ```
 tracker/         Tiny standalone Python poller (player count + chunk changes)
-tracker/viewer/  Static page for exploring the tracker's CSVs (map, timeline, replay)
+tracker/viewer/  Phantom: static page for exploring the CSVs (map, timeline, replay)
 server/          Express API, Dynmap poller, change detector, Discord alerter, SQLite
 client/          React + Tailwind + Vite frontend
 data/            Persisted SQLite DB and alert images (gitignored)

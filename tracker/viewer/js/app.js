@@ -45,7 +45,7 @@
         mode: map.get("mode"), heatMetric: map.get("heatMetric"), heatScale: map.get("heatScale"),
         halfLifeMs: map.get("halfLifeMs"), imageSource: map.get("imageSource"),
         fillContext: map.get("fillContext"), showGrid: map.get("showGrid"), showRuler: map.get("showRuler"),
-        showMarkers: map.get("showMarkers"),
+        showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"),
         skewOverride: state.skewOverride, blocksPerTile: state.blocksPerTile, mapType: state.mapType,
         corrWindowMs: state.corrWindowMs, dataBase: state.dataBase, livePollMs: state.livePollMs,
         theme: document.documentElement.getAttribute("data-theme") || "",
@@ -396,16 +396,19 @@
       P.renderEvents($("eventFeed"), m, seek);
     }
 
-    // --- window-only: the sample table is a list of rows in the window
-    var wkey = m.stamp + "|" + w.t0 + "|" + w.t1;
-    if (wkey !== lastWindowRendered) {
-      lastWindowRendered = wkey;
+    /* --- cursor-dependent.
+       Both feeds run up to the cursor rather than to the end of the window, so
+       they have to re-render as it moves; gating them on the window alone left
+       them frozen while scrubbing. Coarsened to the nearest second so playback
+       does not rebuild them dozens of times inside one second of data. */
+    var ckey = m.stamp + "|" + w.t0 + "|" + Math.floor(c / 1000);
+    if (ckey !== lastWindowRendered) {
+      lastWindowRendered = ckey;
       P.renderSnapshotTable($("snapTable"), m, w.t0, w.t1, c, seek);
       var n = P.renderTransitions($("transFeed"), m, w.t0, w.t1, c, seek);
-      $("transCount").textContent = n ? n + " in window" : "";
+      $("transCount").textContent = n ? n + " so far" : "";
     }
 
-    // --- cursor-dependent
     P.renderNow($("nowPanel"), m, c);
     P.renderCorrelation($("corrPanel"), m, c, state.corrWindowMs);
     P.renderTopTiles($("topTiles"), map.topCells(14), m, function (r) {
@@ -693,7 +696,8 @@
       fillContext: !!s.fillContext,
       showGrid: s.showGrid !== false,
       showRuler: s.showRuler !== false,
-      showMarkers: s.showMarkers !== false
+      showMarkers: s.showMarkers !== false,
+      tileKinds: s.tileKinds || "all"
     });
     if (typeof s.speedIdx === "number") transport.setSpeedIndex(s.speedIdx);
     if (s.loop === false) transport.setLoop(false);
@@ -789,6 +793,7 @@
     $("showGrid").checked = map.get("showGrid");
     $("showRuler").checked = map.get("showRuler");
     $("showMarkers").checked = map.get("showMarkers");
+    $("tileKinds").value = map.get("tileKinds");
     $("halfLife").value = Math.round(map.get("halfLifeMs") / 1000);
     $("halfLifeVal").textContent = M.fmtDur(map.get("halfLifeMs"));
     $("halfLifeRow").hidden = map.get("heatMetric") !== "recency";
@@ -895,6 +900,10 @@
         map.set({ mode: b.dataset.mode });
         syncViewUI(); saveSettings(); updateBadge();
       });
+    });
+    $("tileKinds").addEventListener("change", function () {
+      map.set({ tileKinds: this.value });
+      renderHeatLegend(); renderSlow(); saveSettings();
     });
     $("heatMetric").addEventListener("change", function () {
       map.set({ heatMetric: this.value });

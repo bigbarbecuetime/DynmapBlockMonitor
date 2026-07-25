@@ -54,10 +54,15 @@ window.DV = window.DV || {};
       parts.push(q("info", "○", "Before the first player sample",
         "The tracker had started but had not yet logged a player snapshot."));
     } else {
+      /* A held value is not a stale reading -- it is the answer. players.csv is
+         only written when the roster changes, so "no row for 14 minutes" means
+         "nobody came or went for 14 minutes", which is information rather than a
+         caveat. Say that instead of implying the number is going off. */
       if (isFinite(stale) && stale > Math.max(120000, model.playerPollMs * 6)) {
-        parts.push(q("info", "○", "Value is " + M.fmtDur(stale) + " old",
-          "players.csv is only written when the count or roster changes, so this value has simply held since " +
-          M.fmtTime(snap.ms) + "."));
+        parts.push(q("good", "✓", "No one has joined or left in " + M.fmtDur(stale),
+          "The roster has been unchanged since " + M.fmtTime(snap.ms) +
+          ". The tracker is still polling every " + M.fmtDur(model.playerPollMs) +
+          "; it only writes a row when the count or the names change."));
       }
       if (snap.truncated) {
         parts.push(q("serious", "⚠", "Roster is incomplete",
@@ -124,9 +129,11 @@ window.DV = window.DV || {};
   function renderTransitions(root, model, t0, t1, cursorMs, onSeek) {
     root.innerHTML = "";
     if (!model) { root.innerHTML = '<div class="empty">No data loaded.</div>'; return 0; }
-    var rows = model.transitions.filter(function (t) { return t.ms >= t0 && t.ms <= t1; });
+    /* Up to the CURSOR, not the end of the window: scrubbing should show what
+       had happened by that moment, not spoil what happens later in the window. */
+    var rows = M.sliceRange(model.transitions, t0, cursorMs);
     if (!rows.length) {
-      root.innerHTML = '<div class="empty">No joins or leaves in this window.</div>';
+      root.innerHTML = '<div class="empty">No joins or leaves before the cursor.</div>';
       return 0;
     }
     // Newest first: when following live data the interesting end is the top.
@@ -155,8 +162,8 @@ window.DV = window.DV || {};
   function renderSnapshotTable(root, model, t0, t1, cursorMs, onSeek) {
     root.innerHTML = "";
     if (!model) return;
-    var rows = model.snapshots.filter(function (s) { return s.ms >= t0 && s.ms <= t1; });
-    if (!rows.length) { root.innerHTML = '<div class="empty">No player samples in this window.</div>'; return; }
+    var rows = M.sliceRange(model.snapshots, t0, cursorMs);
+    if (!rows.length) { root.innerHTML = '<div class="empty">No player samples before the cursor.</div>'; return; }
     var t = document.createElement("table");
     t.className = "tbl";
     t.innerHTML = "<thead><tr><th>Time (" + (M.getTimeMode() === "raw" ? "UTC" : "local") +

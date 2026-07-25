@@ -1,4 +1,4 @@
-# Tracker viewer
+# Phantom — viewer
 
 A static page that reads the tracker's `chunks.csv` and `players.csv` and shows
 **which map tiles changed, when, and who was online at the time**. No build step,

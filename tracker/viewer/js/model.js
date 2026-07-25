@@ -274,18 +274,58 @@ window.DV = window.DV || {};
     var diffs = [];
     for (i = 0; i < rawTiles.length; i++) diffs.push(rawTiles[i].capMs - rawTiles[i].rawTileMs);
     diffs.sort(function (a, b) { return a - b; });
-    var rawMin = diffs.length ? diffs[0] : 0;
-    var p1 = pct(diffs, 0.01);
-    var basis = (diffs.length > 100 && isFinite(p1) && (p1 - rawMin) > 60000) ? p1 : rawMin;
-    var estimated = -basis;
-    if (!(estimated > 0)) estimated = 0;   // server behind or in sync: nothing to correct
+
+    function estimateFrom(sorted) {
+      if (!sorted.length) return 0;
+      var lo = sorted[0], p = pct(sorted, 0.01);
+      var basis = (sorted.length > 100 && isFinite(p) && (p - lo) > 60000) ? p : lo;
+      return Math.max(0, -basis);
+    }
+    var estimated = estimateFrom(diffs);
+
+    /* PER RUN, not per file. The offset is a property of the tracker process:
+       tracker.py now anchors its clock to the server's Date header at startup, so
+       a log spanning that change contains one stretch written ~14s slow and
+       another written correctly. A single global estimate would take the worst
+       case from the old stretch and wrongly shift the corrected rows back by it.
+       Each "tracker starting" event opens a new run, so segment there and
+       estimate inside each; runs with too few tiles to be reliable fall back to
+       the file-wide number. */
+    var runStarts = [];
+    for (i = 0; i < lifecycle.length; i++) {
+      if (/^tracker starting/.test(lifecycle[i].raw)) runStarts.push(lifecycle[i].ms);
+    }
+    runStarts.sort(function (a, b) { return a - b; });
+
+    function runOf(ms) {
+      var lo = 0, hi = runStarts.length;
+      while (lo < hi) { var mid = (lo + hi) >> 1; if (runStarts[mid] <= ms) lo = mid + 1; else hi = mid; }
+      return lo - 1;                       // -1 = before any recorded start
+    }
+
+    var runDiffs = new Map();
+    for (i = 0; i < rawTiles.length; i++) {
+      var ri = runOf(rawTiles[i].capMs);
+      if (!runDiffs.has(ri)) runDiffs.set(ri, []);
+      runDiffs.get(ri).push(rawTiles[i].capMs - rawTiles[i].rawTileMs);
+    }
+    var runSkew = new Map();
+    runDiffs.forEach(function (arr, ri) {
+      arr.sort(function (a, b) { return a - b; });
+      runSkew.set(ri, arr.length >= 20 ? estimateFrom(arr) : estimated);
+    });
     var skewMs = (opts.skewMs === null || opts.skewMs === undefined) ? estimated : opts.skewMs;
 
     /* ---- tiles on the corrected (host) timebase ------------------------ */
     var tiles = [];
+    var manual = (opts.skewMs !== null && opts.skewMs !== undefined);
     for (i = 0; i < rawTiles.length; i++) {
       var t = rawTiles[i];
-      t.tileMs = t.rawTileMs - skewMs;
+      // A manual override applies to everything; otherwise each row is corrected
+      // by the offset its own tracker run was written with.
+      var use = manual ? skewMs : (runSkew.has(runOf(t.capMs)) ? runSkew.get(runOf(t.capMs)) : estimated);
+      t.skewMs = use;
+      t.tileMs = t.rawTileMs - use;
       t.lagMs = t.capMs - t.tileMs;      // render -> observed delay, host clock
       tiles.push(t);
     }
@@ -344,6 +384,37 @@ window.DV = window.DV || {};
       if (tl.tz > tb.maxTz) tb.maxTz = tl.tz;
     }
     if (!tiles.length) tb = { minTx: -8, maxTx: 8, minTz: -8, maxTz: 8 };
+
+    /* ---- chunk coordinates + load/edit classification ------------------ */
+    /* Neighbour test by binary search into each cell's own event list, rather
+       than sweeping a time window: four short searches per tile instead of a scan
+       over everything nearby, which matters because this runs on every rebuild. */
+    function neighbourChanged(tx, tz, tMs) {
+      var cell = tileIndex.get(tileKey(tx, tz));
+      if (!cell) return false;
+      var ev = cell.events;                       // indices, ascending in tileMs
+      var lo = 0, hi = ev.length;
+      while (lo < hi) {
+        var mid = (lo + hi) >> 1;
+        if (tiles[ev[mid]].tileMs < tMs - neighbourMs) lo = mid + 1; else hi = mid;
+      }
+      return lo < ev.length && tiles[ev[lo]].tileMs <= tMs + neighbourMs;
+    }
+
+    var loadCount = 0, editCount = 0;
+    for (i = 0; i < tiles.length; i++) {
+      var t2 = tiles[i];
+      var ch = tileChunk(t2.tx, t2.tz, bpt);
+      t2.cx = ch.cx; t2.cz = ch.cz;
+      // The chunk-aligned corner: the tile Dynmap's zoomed LOD shares a name with.
+      t2.aligned = (t2.tx % 2 === 0) && (t2.tz % 2 === 0);
+      t2.isolated = !(neighbourChanged(t2.tx + 1, t2.tz, t2.tileMs) ||
+                      neighbourChanged(t2.tx - 1, t2.tz, t2.tileMs) ||
+                      neighbourChanged(t2.tx, t2.tz + 1, t2.tileMs) ||
+                      neighbourChanged(t2.tx, t2.tz - 1, t2.tileMs));
+      t2.kind = (t2.aligned && t2.isolated) ? "load" : "edit";
+      if (t2.kind === "load") loadCount++; else editCount++;
+    }
 
     /* ---- pass 2: player rows ------------------------------------------ */
     /* Rows sharing one "time" are ONE snapshot (tracker.py writes one row per
@@ -547,7 +618,8 @@ window.DV = window.DV || {};
     /* The summary counts assess() needs are tallied HERE, in the pass that
        already visits every tile, rather than in four more full passes inside
        assess() itself. */
-    var stats = { outsideCoverage: 0, whileEmpty: 0, truncated: 0, overfull: 0 };
+    var stats = { outsideCoverage: 0, whileEmpty: 0, truncated: 0, overfull: 0,
+                  loads: loadCount, edits: editCount };
     var si = -1;
     for (i = 0; i < tiles.length; i++) {
       var tm = tiles[i].tileMs;
@@ -587,10 +659,12 @@ window.DV = window.DV || {};
       chunkErrors: chunkErrors, playerErrors: playerErrors,
       chunkWindows: chunkWindows, playerWindows: playerWindows,
       events: events, coverage: coverage, steps: steps, bounds: bounds, stats: stats,
+      neighbourMs: neighbourMs,
       blocksPerTile: bpt, retentionMs: retention,
       mapType: mapType, mapTypes: mapTypes, tilesAllMaps: allTiles.length,
       pollMs: pollMs, playerPollMs: playerPollMs, playerChangeMs: playerChangeMs,
-      skew: { ms: skewMs, estimatedMs: estimated, overridden: opts.skewMs !== null && opts.skewMs !== undefined,
+      skew: { ms: skewMs, estimatedMs: estimated, overridden: manual,
+              perRun: Array.from(runSkew.entries()).map(function (e) { return { run: e[0], ms: e[1] }; }),
               samples: diffs.length, rawMinMs: diffs.length ? diffs[0] : 0,
               rawMedianMs: median(diffs), rawMaxMs: diffs.length ? diffs[diffs.length - 1] : 0 },
       lag: lag,
@@ -694,33 +768,53 @@ window.DV = window.DV || {};
           m.mapType + " is plotted. Pick another under Map, or set MAP_TYPE in the tracker to log just one. Note the isometric types (t, night2, test1) need a different blocks-per-tile than the flat ones." });
     }
 
+    /* Written for someone reading their own data, not for someone debugging this
+       code: lead with what it means for what they are looking at, and only then
+       explain the mechanism. */
     if (s.ms > 0) {
-      q.push({ severity: s.overridden ? "info" : "warning", code: "clock-skew",
-        title: "Dynmap clock is " + fmtDur(s.ms) + " ahead of the tracker host",
-        detail: "Measured from " + s.samples.toLocaleString() + " tiles (raw capture-minus-render ran " +
-          fmtSigned(s.rawMinMs) + " to " + fmtSigned(s.rawMaxMs) + ", median " + fmtSigned(s.rawMedianMs) +
-          "). Tile times are shifted by -" + fmtDur(s.ms) + " onto the host clock so they line up with players.csv." +
-          (s.overridden ? " Using your manual override." : "") });
+      var runs = s.perRun.length;
+      q.push({ severity: "info", code: "clock-skew",
+        title: "Times are corrected by " + fmtDur(s.ms) + " so both files line up",
+        detail: "Your tracker's clock and Dynmap's disagreed by about " + fmtDur(s.ms) +
+          ", which would otherwise put every map change " + fmtDur(s.ms) +
+          " away from the player activity that caused it. That is corrected here, so what you see is aligned." +
+          (runs > 1 ? " Measured separately for each of the " + runs + " tracker runs in this file, since the offset can change between them." : "") +
+          " Usually it is the tracker's host that has drifted -- check its time sync if you want the raw files to be right too." +
+          (s.overridden ? " You have set a manual offset, which is being used instead." : "") });
     } else if (s.samples) {
-      q.push({ severity: "good", code: "clock-ok", title: "Clocks agree",
-        detail: "No correction needed: no tile was stamped ahead of the poll that found it." });
+      q.push({ severity: "good", code: "clock-ok", title: "Both files are on the same clock",
+        detail: "No correction needed -- map changes and player activity can be compared directly." });
     }
 
     if (m.lag.samples) {
-      q.push({ severity: m.lag.negative ? "warning" : "info", code: "render-lag",
-        title: "Render lag median " + fmtDur(m.lag.medianMs) + ", max " + fmtDur(m.lag.maxMs),
+      q.push({ severity: m.lag.negative ? "warning" : "good", code: "render-lag",
+        title: m.lag.negative
+          ? "Some times could not be reconciled"
+          : "Map changes show up about " + fmtDur(m.lag.medianMs) + " after they happen",
         detail: m.lag.negative
           ? m.lag.negative.toLocaleString() + " of " + m.lag.samples.toLocaleString() +
-            " tiles still look observed before they rendered, so the skew estimate is imperfect for those. Nudge it manually if the timeline looks off."
-          : "Every tile was observed after it rendered once corrected, which is the consistency check on the skew estimate. Poll interval is about " + fmtDur(m.pollMs) + "." });
+            " changes still appear to have been seen before they happened, which means the correction above is not quite right for them. Their position on the timeline may be off by a few seconds."
+          : "Dynmap takes a moment to redraw a tile and the tracker checks every " + fmtDur(m.pollMs) +
+            ", so a change appears " + fmtDur(m.lag.medianMs) + " later on average (worst case " + fmtDur(m.lag.maxMs) +
+            "). Everything on the timeline already accounts for this." });
+    }
+
+    if (m.stats.loads + m.stats.edits > 0) {
+      var loadPct = 100 * m.stats.loads / (m.stats.loads + m.stats.edits);
+      q.push({ severity: "info", code: "load-vs-edit",
+        title: Math.round(loadPct) + "% of map changes look like chunks loading, not edits",
+        detail: m.stats.loads.toLocaleString() + " of " + (m.stats.loads + m.stats.edits).toLocaleString() +
+          " changes sit alone on a chunk boundary, which is what Dynmap does when it redraws a chunk a player just walked into -- re-fetching those tiles shows the picture is usually identical. " +
+          "The remaining " + m.stats.edits.toLocaleString() + " touch neighbouring tiles and are the better candidates for someone actually building. " +
+          "Use Show -> \"Likely block edits only\" to drop the loading noise, or \"chunk loads only\" to watch players move." });
     }
 
     var gaps = m.coverage.filter(function (c) { return !c.complete; });
     if (gaps.length) {
       q.push({ severity: "serious", code: "coverage",
-        title: gaps.length + " tracker run" + (gaps.length > 1 ? "s" : "") + " with no clean end",
-        detail: gaps.map(function (c) { return fmtTime(c.startMs) + " -> " + fmtTime(c.endMs) + " (" + c.endReason + ")"; }).join("; ") +
-          ". Outside a covered run the data is absent, not quiet -- an empty map there means nobody was watching." });
+        title: "The tracker stopped unexpectedly " + gaps.length + " time" + (gaps.length > 1 ? "s" : ""),
+        detail: "So the end of those runs is guessed at: " + gaps.map(function (c) { return fmtTime(c.startMs) + " to " + fmtTime(c.endMs) + " (" + c.endReason + ")"; }).join("; ") +
+          ". Where the timeline is hatched, nothing was being recorded -- a blank map there means nobody was watching, not that the server was quiet." });
     }
 
     var offMs = 0;
@@ -729,8 +823,9 @@ window.DV = window.DV || {};
       for (var i = 0; i < m.coverage.length; i++) on += Math.max(0, m.coverage[i].endMs - m.coverage[i].startMs);
       offMs = Math.max(0, span - on);
       if (offMs > 1000) {
-        q.push({ severity: "info", code: "off-time", title: fmtDur(offMs) + " of the file's span has no tracker running",
-          detail: "Shown hatched on the timeline. " + (100 * on / span).toFixed(1) + "% of the range is covered." });
+        q.push({ severity: "info", code: "off-time", title: "You are only seeing " + (100 * on / span).toFixed(0) + "% of this time range",
+          detail: "The tracker was off for " + fmtDur(offMs) + " of the " + fmtDur(span) +
+          " this file spans, shown hatched on the timeline. Live data is necessarily thin at first; a few hours of history usually reads much better." });
       }
     }
 
@@ -752,22 +847,22 @@ window.DV = window.DV || {};
 
     if (m.playerErrors.length) {
       q.push({ severity: "warning", code: "player-errors",
-        title: m.playerErrors.length + " player ping error" + (m.playerErrors.length > 1 ? "s" : ""),
-        detail: "Player state is a point sample, so an errored ping is a hole: the previous roster is carried forward but a join or leave inside the window can be missed entirely. Reasons: " +
+        title: "The player list was briefly unreachable " + m.playerErrors.length + " time" + (m.playerErrors.length > 1 ? "s" : ""),
+        detail: "Someone could have joined and left inside one of those gaps without ever appearing here. The roster shown just carries over from before. Cause: " +
           uniqReasons(m.playerWindows) + "." });
     }
 
     var trunc = m.stats.truncated;
     if (trunc) {
       q.push({ severity: "serious", code: "sample-cap",
-        title: trunc + " snapshot" + (trunc > 1 ? "s" : "") + " where the count exceeds the named players",
-        detail: "Server List Ping only returns a sample of names and this server capped it, so those rosters are incomplete and derived joins/leaves there are marked uncertain. Counts stay trustworthy." });
+        title: "Some players could not be named (" + trunc + " sample" + (trunc > 1 ? "s" : "") + ")",
+        detail: "The server only publishes a sample of names, so the head-count is right but the name list is short. Joins and leaves worked out across those moments are marked with a ? because they may be wrong." });
     }
 
     var over = m.stats.overfull;
     if (over) {
       q.push({ severity: "warning", code: "count-below-roster",
-        title: over + " snapshot" + (over > 1 ? "s" : "") + " list a player while reporting a lower count",
+        title: "The server contradicted itself " + over + " time" + (over > 1 ? "s" : ""),
         detail: "The server's own status reply was internally inconsistent (typically a stale name sample caught right at a disconnect). Trust the names less than the count here: " +
           m.stats.overfullExamples.map(function (x) { return fmtTime(x.ms) + " (count " + x.count + ", " + x.roster.length + " named)"; }).join(", ") +
           (over > m.stats.overfullExamples.length ? ", ..." : "") + "." });
@@ -776,16 +871,16 @@ window.DV = window.DV || {};
     var orphan = m.stats.outsideCoverage;
     if (orphan) {
       q.push({ severity: "warning", code: "tile-outside-coverage",
-        title: orphan.toLocaleString() + " tile" + (orphan > 1 ? "s" : "") + " corrected to a time with no tracker running",
-        detail: "Their corrected render time lands just outside a run -- expected right at a start/stop boundary, since a tile can render before the tracker was listening and only be picked up after. Not a fault unless the number is large." });
+        title: orphan.toLocaleString() + " change" + (orphan > 1 ? "s" : "") + " landed just outside a tracker run",
+        detail: "Normal at a start or stop: the map can change a moment before the tracker starts watching and only be picked up afterwards. Worth a look only if this number is large." });
     }
 
     var idle = m.stats.whileEmpty;
     if (idle && m.tiles.length) {
       q.push({ severity: "info", code: "changes-while-empty",
-        title: (100 * idle / m.tiles.length).toFixed(1) + "% of tile changes happened with nobody online",
+        title: (100 * idle / m.tiles.length).toFixed(1) + "% of map changes happened with nobody online",
         detail: idle.toLocaleString() + " of " + m.tiles.length.toLocaleString() +
-          " tiles re-rendered while the player count read 0. Dynmap re-renders on block ticks and chunk loads too, not just player edits, so this is normal -- but it also means tile activity is not a clean proxy for player activity." });
+          " changes happened while nobody was logged in. The world keeps ticking without players, so a low number here is normal and simply means map activity is not a perfect stand-in for player activity." });
     }
 
     return q;

@@ -1,4 +1,4 @@
-name: dynmap-tracker
+name: phantom
 
 services:
   tracker:
@@ -6,13 +6,13 @@ services:
     image: ghcr.io/bigbarbecuetime/dynmap-tracker:latest
     # Developers building from source: uncomment the next line and run `docker compose up --build`.
     build: .
-    container_name: dynmap-tracker
+    container_name: phantom
     restart: unless-stopped
     env_file: .env          # copy .env.example to .env and fill it in
     volumes:
       - ./data:/data        # logs land in ./data on the host
 
-  # Serves the CSV viewer at http://127.0.0.1:8080/viewer/ out of the same image.
+  # Serves the Phantom viewer at http://127.0.0.1:8080/viewer/ out of the same image.
   #
   # The page is COPYied into the image, so editing viewer/ needs a rebuild:
   #     docker compose up -d --build viewer
@@ -28,7 +28,7 @@ services:
   viewer:
     image: ghcr.io/bigbarbecuetime/dynmap-tracker:latest
     build: .
-    container_name: dynmap-tracker-viewer
+    container_name: phantom-viewer
     restart: on-failure
     command: ["python", "viewer/serve.py", "--host", "0.0.0.0", "--port", "8080", "--no-browser"]
     environment:

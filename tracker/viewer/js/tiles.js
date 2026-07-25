@@ -34,9 +34,20 @@ window.DV = window.DV || {};
       border: v("--border"), surface1: v("--surface-1"),
       tiles: v("--series-tiles"), players: v("--series-players"),
       critical: v("--status-critical"), warning: v("--status-warning"),
-      heat: [v("--heat-0"), v("--heat-1"), v("--heat-2"), v("--heat-3"), v("--heat-4"), v("--heat-5")]
+      /* One ramp per heat measure, so the colour says which question the map is
+         answering. Keyed by the metric name used in state.heatMetric. */
+      ramps: {
+        count:   [v("--heat-0"), v("--heat-1"), v("--heat-2"), v("--heat-3"), v("--heat-4"), v("--heat-5")],
+        last:    [v("--newest-0"), v("--newest-1"), v("--newest-2"), v("--newest-3"), v("--newest-4"), v("--newest-5")],
+        recency: [v("--decay-0"), v("--decay-1"), v("--decay-2"), v("--decay-3"), v("--decay-4"), v("--decay-5")]
+      }
     };
   }
+
+  /* Each ramp starts at white for its lowest bin. Left fully opaque, a white low
+     end glares on the dark map plane and the sparse majority would shout over the
+     dense minority, so the bottom bins are drawn back toward the surface. */
+  var BIN_ALPHA = [0.30, 0.48, 0.66, 0.82, 0.93, 1.0];
 
   var HEAT_BINS = 6;
   /* Above this many visible cells we stop requesting tile art: it would be
@@ -69,6 +80,7 @@ window.DV = window.DV || {};
       showGrid: true,
       showRuler: true,
       showMarkers: true,        // Dynmap's marker layer (world border, spawn, ...)
+      tileKinds: "all",         // all | edits | loads  -- see the classification note in model.js
       // view: grid units (gx = tx, gy = -tz) at centre, plus px-per-tile
       gx: 0, gy: 0, scale: 6,
       hover: null, selected: null
@@ -134,7 +146,7 @@ window.DV = window.DV || {};
        start, so a forward step just folds in the tiles between the old cursor and
        the new one; anything else (window start moved, cursor jumped backwards,
        new model, metric changed) falls back to a full rebuild. */
-    var acc = { t0: NaN, cursor: NaN, metric: null, halfLifeMs: NaN, model: null, idx: 0 };
+    var acc = { t0: NaN, cursor: NaN, metric: null, halfLifeMs: NaN, model: null, idx: 0, kinds: null };
 
     /* Only tiles whose corrected render time falls in [windowStart, cursor]
        contribute, so scrubbing the cursor genuinely rewinds the map instead of
@@ -146,11 +158,11 @@ window.DV = window.DV || {};
 
       var full = !m || m !== acc.model || from !== acc.t0 ||
                  state.heatMetric !== acc.metric || state.halfLifeMs !== acc.halfLifeMs ||
-                 !(to >= acc.cursor);
+                 state.tileKinds !== acc.kinds || !(to >= acc.cursor);
       if (full) {
         heat.clear();
         acc.model = m; acc.t0 = from; acc.metric = state.heatMetric;
-        acc.halfLifeMs = state.halfLifeMs;
+        acc.halfLifeMs = state.halfLifeMs; acc.kinds = state.tileKinds;
         acc.idx = m && m.tiles.length ? lowerBound(m.tiles, from) : 0;
       }
       acc.cursor = to;
@@ -162,6 +174,9 @@ window.DV = window.DV || {};
       for (; i < tiles.length; i++) {
         var t = tiles[i];
         if (t.tileMs > to) break;
+        // Chunk loads swamp real edits ~3:1, so they can be filtered out here.
+        if (state.tileKinds === "edits" && t.kind === "load") continue;
+        if (state.tileKinds === "loads" && t.kind !== "load") continue;
         var k = t.tx + "," + t.tz;
         var c = heat.get(k);
         if (!c) {
@@ -347,13 +362,14 @@ window.DV = window.DV || {};
         // 2px surface gap between filled cells once they are big enough to show
         // one, so adjacent hot tiles read as separate cells and not one blob.
         var gap = s >= 10 ? 2 : 0;
-        ctx.globalAlpha = alpha;
+        var ramp = pal.ramps[state.heatMetric] || pal.ramps.count;
         heat.forEach(function (c) {
           if (c.tx < vis.tx0 || c.tx > vis.tx1 || c.tz < vis.tz0 || c.tz > vis.tz1) return;
           var b = heatBin(c.v);
           if (b < 0) return;
           var r = cellRect(c.tx, c.tz);
-          ctx.fillStyle = pal.heat[b];
+          ctx.globalAlpha = alpha * BIN_ALPHA[b];
+          ctx.fillStyle = ramp[b];
           ctx.fillRect(r.x + gap / 2, r.y + gap / 2, Math.max(1, r.s - gap), Math.max(1, r.s - gap));
         });
         ctx.globalAlpha = 1;
@@ -771,7 +787,7 @@ window.DV = window.DV || {};
         for (var k in patch) {
           if (state[k] === patch[k]) continue;
           state[k] = patch[k];
-          if (k === "heatMetric" || k === "halfLifeMs" || k === "heatScale") reheat = true;
+          if (k === "heatMetric" || k === "halfLifeMs" || k === "heatScale" || k === "tileKinds") reheat = true;
         }
         if (reheat) recomputeHeat();
         invalidate();
