@@ -45,6 +45,7 @@
         mode: map.get("mode"), heatMetric: map.get("heatMetric"), heatScale: map.get("heatScale"),
         halfLifeMs: map.get("halfLifeMs"), imageSource: map.get("imageSource"),
         fillContext: map.get("fillContext"), showGrid: map.get("showGrid"), showRuler: map.get("showRuler"),
+        showMarkers: map.get("showMarkers"),
         skewOverride: state.skewOverride, blocksPerTile: state.blocksPerTile, mapType: state.mapType,
         corrWindowMs: state.corrWindowMs, dataBase: state.dataBase, livePollMs: state.livePollMs,
         theme: document.documentElement.getAttribute("data-theme") || "",
@@ -162,6 +163,7 @@
         hideDrop();
         return probeHistorical(base);
       })
+      .then(loadMarkers)
       .then(function () { return true; })          // loaded and drawn
       .catch(function (e) {
         if (e === HANDLED) return false;
@@ -196,6 +198,30 @@
       }).catch(next);
     }
     return next();
+  }
+
+  /* Dynmap's marker layer carries the world border (and spawn), in raw world
+     coordinates. It has to come through serve.py: the marker JSON is served
+     without CORS headers, so a direct cross-origin fetch from the page is
+     blocked -- unlike the tile images, which are <img> loads and need none. */
+  function loadMarkers() {
+    var m = state.model;
+    if (!m || !m.tiles.length) return Promise.resolve();
+    var world = m.tiles[0].world;
+    if (!world) return Promise.resolve();
+    return fetch("/api/markers?world=" + encodeURIComponent(world), { cache: "no-store" })
+      .then(function (res) { return res.json().then(function (j) { return { ok: res.ok, body: j }; }); })
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.body && r.body.error ? r.body.error : "unavailable");
+        map.setMarkers(r.body);
+        state.markerError = "";
+      })
+      .catch(function (e) {
+        // Not fatal: the map simply has no border overlay.
+        map.setMarkers(null);
+        state.markerError = e.message || String(e);
+      })
+      .then(updateSourceNote);
   }
 
   function readFile(file) {
@@ -498,6 +524,20 @@
     }
     // An empty Set is truthy, so test the size: "0 saved tile images available"
     // reads as though replay were possible when it isn't.
+    var mk = map.markerSummary();
+    if (mk) {
+      var bits2 = [];
+      if (mk.border) {
+        var bx = mk.border.x, bz = mk.border.z;
+        bits2.push("world border " + Math.round(Math.min.apply(null, bx)) + ".." + Math.round(Math.max.apply(null, bx)) +
+          " x " + Math.round(Math.min.apply(null, bz)) + ".." + Math.round(Math.max.apply(null, bz)));
+      }
+      if (mk.points) bits2.push(mk.points + " marker" + (mk.points > 1 ? "s" : ""));
+      bits.push("Marker layer: " + (bits2.length ? bits2.join(", ") : "empty") + ".");
+    } else if (state.markerError) {
+      bits.push("Marker layer unavailable (" + state.markerError + "), so no world border is drawn.");
+    }
+
     if (state.historical && state.historical.size) {
       bits.push(state.historical.size.toLocaleString() + " saved tile images available for historical replay.");
     } else {
@@ -624,7 +664,24 @@
       }
     });
 
-    transport = DV.createTransport({ onChange: renderFast });
+    transport = DV.createTransport({
+      onChange: renderFast,
+      /* Playback ran off the end of the window. If we were playing toward the
+         newest data and a live source is available, catch up and start following
+         it instead of looping or stopping -- that is almost always what
+         fast-forwarding to the end was for. Returning true means "handled". */
+      onEnd: function () {
+        var m = state.model;
+        if (state.live || !state.tailChunks || !m || !isFinite(m.bounds.maxMs)) return false;
+        // Only when the window actually reaches the newest data. Playing to the
+        // end of a deliberately-chosen earlier window should still loop/stop.
+        var w = transport.window();
+        if (w.t1 < m.bounds.maxMs - Math.max(2000, m.pollMs)) return false;
+        transport.pause();
+        transport.toEnd();
+        return startLive();
+      }
+    });
 
     // Apply stored view settings now that the renderers exist.
     map.set({
@@ -635,15 +692,20 @@
       imageSource: s.imageSource || "auto",
       fillContext: !!s.fillContext,
       showGrid: s.showGrid !== false,
-      showRuler: s.showRuler !== false
+      showRuler: s.showRuler !== false,
+      showMarkers: s.showMarkers !== false
     });
     if (typeof s.speedIdx === "number") transport.setSpeedIndex(s.speedIdx);
     if (s.loop === false) transport.setLoop(false);
+
+    try { M.setTimeMode(localStorage.getItem("dv.timeMode") || "local"); } catch (e) {}
 
     bindControls();
     bindKeys();
     bindDrop();
     bindMobile();
+    bindTimeToggle();
+    applyTimeModeHints();
 
     applyCompact();
     window.addEventListener("resize", function () {
@@ -704,6 +766,7 @@
     $("fillContext").checked = map.get("fillContext");
     $("showGrid").checked = map.get("showGrid");
     $("showRuler").checked = map.get("showRuler");
+    $("showMarkers").checked = map.get("showMarkers");
     $("halfLife").value = Math.round(map.get("halfLifeMs") / 1000);
     $("halfLifeVal").textContent = M.fmtDur(map.get("halfLifeMs"));
     $("halfLifeRow").hidden = map.get("heatMetric") !== "recency";
@@ -833,6 +896,7 @@
     });
     $("showGrid").addEventListener("change", function () { map.set({ showGrid: this.checked }); saveSettings(); });
     $("showRuler").addEventListener("change", function () { map.set({ showRuler: this.checked }); saveSettings(); });
+    $("showMarkers").addEventListener("change", function () { map.set({ showMarkers: this.checked }); saveSettings(); });
 
     $("fitBtn").addEventListener("click", function () { map.fit(); });
     $("fitBtn2").addEventListener("click", function () { map.fit(); });
@@ -983,6 +1047,33 @@
   }
 
   /* ------------------------------------------------------------ mobile tabs */
+
+  /* Clicking any timestamp flips the whole UI between local time and the exact
+     UTC string the CSV holds. Delegated from the document because timestamps are
+     re-rendered constantly -- per-element handlers would have to be re-attached
+     on every panel rebuild. The model is rebuilt too, because assess() bakes
+     formatted times into its report strings; with the parse cache that costs
+     about 10ms, which is imperceptible on a click. */
+  function bindTimeToggle() {
+    document.addEventListener("click", function (ev) {
+      var el = ev.target.closest(".ts");
+      if (!el) return;
+      ev.stopPropagation();          // don't also seek when a feed row is clicked
+      M.toggleTimeMode();
+      try { localStorage.setItem("dv.timeMode", M.getTimeMode()); } catch (e) {}
+      applyTimeModeHints();
+      rebuild(true);
+    }, true);                        // capture: beat the row's own seek handler
+  }
+
+  function applyTimeModeHints() {
+    var raw = M.getTimeMode() === "raw";
+    var hint = raw
+      ? "showing the raw UTC timestamp from the CSV — click for " + M.timeZoneName() + " local time"
+      : "showing " + M.timeZoneName() + " local time — click for the raw UTC timestamp";
+    $("cursorLabel").title = hint;
+    Array.prototype.forEach.call(document.querySelectorAll("#axisA, #axisB"), function (e) { e.title = hint; });
+  }
 
   function bindMobile() {
     var tabs = $("mtabs");

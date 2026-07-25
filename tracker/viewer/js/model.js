@@ -774,23 +774,68 @@ window.DV = window.DV || {};
 
   function two(n) { return (n < 10 ? "0" : "") + n; }
 
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  /* Display mode for every timestamp in the UI:
+       "local" -- the viewer's own timezone, date first, 12-hour. What you want
+                  when reading "when did this happen".
+       "raw"   -- the exact UTC string the CSV holds. What you want when
+                  cross-referencing a row in the file.
+     The tracker always WRITES UTC; this only changes how it is shown. Clicking
+     any timestamp in the UI flips between the two. */
+  var timeMode = "local";
+
+  function setTimeMode(m) { timeMode = (m === "raw") ? "raw" : "local"; }
+  function getTimeMode() { return timeMode; }
+  function toggleTimeMode() { setTimeMode(timeMode === "local" ? "raw" : "local"); return timeMode; }
+
+  function timeZoneName() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "local time"; }
+    catch (e) { return "local time"; }
+  }
+
+  function hour12(d) { var h = d.getHours() % 12; return h === 0 ? 12 : h; }
+  function meridiem(d) { return d.getHours() < 12 ? "AM" : "PM"; }
+
+  function localClock(d) {
+    return hour12(d) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds()) + " " + meridiem(d);
+  }
+
+  /* Date first, then the 12-hour clock: "Jul 24, 3:44:39 PM". */
+  function localDateTime(d) {
+    return MONTHS[d.getMonth()] + " " + d.getDate() + ", " + localClock(d);
+  }
+
+  /* Clock only. Compact enough for a dense feed column. */
   function fmtTime(ms) {
     if (!isFinite(ms)) return "--:--:--";
     var d = new Date(ms);
-    return two(d.getUTCHours()) + ":" + two(d.getUTCMinutes()) + ":" + two(d.getUTCSeconds());
+    if (timeMode === "raw") {
+      return two(d.getUTCHours()) + ":" + two(d.getUTCMinutes()) + ":" + two(d.getUTCSeconds());
+    }
+    return localClock(d);
   }
 
+  /* The full stamp: in raw mode this is byte-for-byte what the CSV contains. */
   function fmtStamp(ms) {
-    if (!isFinite(ms)) return "---------T--:--:--Z";
+    if (!isFinite(ms)) return timeMode === "raw" ? "---------T--:--:--Z" : "--";
     var d = new Date(ms);
-    return d.getUTCFullYear() + "-" + two(d.getUTCMonth() + 1) + "-" + two(d.getUTCDate()) +
-      "T" + fmtTime(ms) + "Z";
+    if (timeMode === "raw") {
+      return d.getUTCFullYear() + "-" + two(d.getUTCMonth() + 1) + "-" + two(d.getUTCDate()) +
+        "T" + two(d.getUTCHours()) + ":" + two(d.getUTCMinutes()) + ":" + two(d.getUTCSeconds()) + "Z";
+    }
+    return localDateTime(d);
   }
 
+  /* Date + time, for rows that can span more than one day. */
   function fmtDate(ms) {
     if (!isFinite(ms)) return "--";
     var d = new Date(ms);
-    return two(d.getUTCMonth() + 1) + "-" + two(d.getUTCDate()) + " " + fmtTime(ms);
+    if (timeMode === "raw") {
+      return two(d.getUTCMonth() + 1) + "-" + two(d.getUTCDate()) + " " +
+        two(d.getUTCHours()) + ":" + two(d.getUTCMinutes()) + ":" + two(d.getUTCSeconds());
+    }
+    return localDateTime(d);
   }
 
   function fmtDur(ms) {
@@ -807,19 +852,22 @@ window.DV = window.DV || {};
 
   function fmtSigned(ms) { return (ms >= 0 ? "+" : "") + fmtDur(ms); }
 
-  /* datetime-local <-> epoch ms, both in UTC so the inputs read the same as the
-     CSV instead of silently shifting into the viewer's local zone. */
+  /* datetime-local <-> epoch ms, in the viewer's OWN timezone -- which is what
+     <input type="datetime-local"> means, and what the rest of the UI now shows.
+     These deliberately do NOT follow the raw/local display toggle: the control
+     has no way to render a "Z" suffix, so a UTC value in it would silently read
+     as local to the browser and shift the window by the offset on every edit. */
   function toLocalInput(ms) {
     if (!isFinite(ms)) return "";
     var d = new Date(ms);
-    return d.getUTCFullYear() + "-" + two(d.getUTCMonth() + 1) + "-" + two(d.getUTCDate()) +
-      "T" + two(d.getUTCHours()) + ":" + two(d.getUTCMinutes()) + ":" + two(d.getUTCSeconds());
+    return d.getFullYear() + "-" + two(d.getMonth() + 1) + "-" + two(d.getDate()) +
+      "T" + two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
   }
 
   function fromLocalInput(v) {
     var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(v || "");
     if (!m) return NaN;
-    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
+    return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime();
   }
 
   DV.model = {
@@ -829,6 +877,8 @@ window.DV = window.DV || {};
     BLOCKS_PER_TILE: BLOCKS_PER_TILE, RETENTION_MS: RETENTION_MS,
     fmtTime: fmtTime, fmtStamp: fmtStamp, fmtDate: fmtDate, fmtDur: fmtDur, fmtSigned: fmtSigned,
     toLocalInput: toLocalInput, fromLocalInput: fromLocalInput, pct: pct,
+    setTimeMode: setTimeMode, getTimeMode: getTimeMode, toggleTimeMode: toggleTimeMode,
+    timeZoneName: timeZoneName,
     // Shared sorted-array helpers -- the one implementation for every hot path.
     lowerBound: lowerBound, atOrBefore: atOrBefore, sliceRange: sliceRange
   };

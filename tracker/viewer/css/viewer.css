@@ -269,6 +269,12 @@ input[type="range"] { width: 100%; accent-color: var(--series-players); }
 .hint { font-size: 11px; color: var(--text-3); line-height: 1.45; margin: 6px 0 0; }
 .hint code { font-family: var(--mono); font-size: 10.5px; }
 
+/* Clickable timestamps: clicking any of them flips the whole UI between local
+   time and the raw UTC value the CSV stores. Underline is the affordance; the
+   dotted style keeps a dense feed column from looking like a wall of links. */
+.ts { cursor: pointer; text-decoration: underline dotted transparent; text-underline-offset: 2px; }
+.ts:hover { text-decoration-color: currentColor; }
+
 kbd {
   font-family: var(--mono);
   font-size: 10px;

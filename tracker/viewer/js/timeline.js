@@ -636,6 +636,10 @@ window.DV = window.DV || {};
       st.last = now;
       var next = st.cursor + dt / 1000 * speed();
       if (next > st.t1) {
+        /* Fast-forwarding into the present. Give the host a chance to take over
+           -- if a live source is available it makes far more sense to keep
+           following new data than to loop back to the start or stop dead. */
+        if (opts.onEnd && opts.onEnd()) return;
         if (st.loop) next = st.t0; else { next = st.t1; st.playing = false; }
       } else if (next < st.t0) {
         if (st.loop) next = st.t1; else { next = st.t0; st.playing = false; }

@@ -46,6 +46,15 @@ hatched (absent data, not a quiet server) and poll outages are marked.
 sample as a table, the tile/player correlation, the busiest tiles, and a data
 quality report.
 
+**Timestamps** are shown in your own timezone, date first, 12-hour
+(`Jul 24, 3:44:39 PM`). **Click any of them** to switch the whole UI to the exact
+UTC string the CSV stores (`2026-07-24T03:44:39Z`) — useful when matching a row
+in the file — and click again to switch back. The choice persists.
+
+**World border and markers** come from Dynmap's own marker layer, drawn in the
+server's colours. Note the border is usually larger than the logged area, so
+"Fit all" frames the tiles, not the border — zoom out to see it.
+
 ## Playback
 
 | | |
@@ -62,6 +71,9 @@ quality report.
 
 Speed is in **data seconds per real second** (1× to 3600×, forwards or
 backwards) — the only unit that means anything for a file spanning a day.
+Fast-forwarding off the end of a window that reaches the newest data **hands over
+to live mode** rather than looping, which is usually why you were fast-forwarding.
+Playing to the end of a deliberately earlier window still loops or stops.
 
 **Live mode** follows the CSVs as the tracker appends to them, using HTTP Range
 requests so each poll transfers the newly appended bytes rather than re-reading a
@@ -165,9 +177,17 @@ neighbouring cells from different projections.
 | `js/app.js` | wiring, loading, live mode, keyboard |
 | `serve.py` | static server with Range support and `/api/images` |
 
-`serve.py` adds only two things over any static server: **Range requests**, so
-live mode tails cheaply, and **`GET /api/images`**, which lists the saved tile
-snapshots in `data/chunks/` (plain HTTP offers no directory listing, so without it
-historical tile art can't be found). Both degrade gracefully if absent.
+`serve.py` adds three things over any static server, all of which degrade
+gracefully if absent:
+
+- **Range requests**, so live mode tails only the appended bytes.
+- **`GET /api/images`** — lists the saved tile snapshots in `data/chunks/`, since
+  plain HTTP offers no directory listing and historical tile art can't otherwise
+  be found.
+- **`GET /api/markers?world=…`** — proxies Dynmap's marker layer. That endpoint
+  sends no `Access-Control-Allow-Origin`, so the page cannot fetch it
+  cross-origin itself (tile *images* are fine — `<img>` needs no CORS). The host
+  comes from `DYNMAP_URL` (env, or the tracker's `.env`), never from the request,
+  and the world name is pattern-checked, so this cannot be used as an open relay.
 
 `window.DV.app` is exposed in the console for poking at the model.

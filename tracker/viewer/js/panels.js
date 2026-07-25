@@ -135,7 +135,7 @@ window.DV = window.DV || {};
       item.className = "feed__item";
       if (Math.abs(tr.ms - cursorMs) < Math.max(2000, model.playerPollMs)) item.classList.add("is-cursor");
       item.innerHTML =
-        '<span class="feed__t">' + M.fmtTime(tr.ms) + "</span>" +
+        '<span class="feed__t ts">' + M.fmtTime(tr.ms) + "</span>" +
         '<span class="feed__who">' + esc(tr.player) +
           (tr.uncertain ? ' <span title="' + esc(tr.reason) + '" style="opacity:.75">?</span>' : "") +
         "</span>" +
@@ -159,7 +159,8 @@ window.DV = window.DV || {};
     if (!rows.length) { root.innerHTML = '<div class="empty">No player samples in this window.</div>'; return; }
     var t = document.createElement("table");
     t.className = "tbl";
-    t.innerHTML = "<thead><tr><th>Time (UTC)</th><th class=num>Count</th><th>Named</th></tr></thead>";
+    t.innerHTML = "<thead><tr><th>Time (" + (M.getTimeMode() === "raw" ? "UTC" : "local") +
+      ")</th><th class=num>Count</th><th>Named</th></tr></thead>";
     var tb = document.createElement("tbody");
     rows.slice().reverse().slice(0, 400).forEach(function (s) {
       var tr = document.createElement("tr");
@@ -227,7 +228,7 @@ window.DV = window.DV || {};
       info.events.slice().reverse().slice(0, 60).forEach(function (t) {
         var item = document.createElement("div");
         item.className = "feed__item";
-        item.innerHTML = '<span class="feed__t">' + M.fmtDate(t.tileMs) + "</span>" +
+        item.innerHTML = '<span class="feed__t ts">' + M.fmtDate(t.tileMs) + "</span>" +
           '<span class="feed__who" style="font-weight:400">' +
             (t.online === null ? "?" : t.online + " online") +
             (t.roster.length ? " · " + esc(t.roster.join(", ")) : "") + "</span>" +
@@ -359,7 +360,7 @@ window.DV = window.DV || {};
           r.tx + ", " + r.tz + "</td>" +
         "<td>" + r.world.x0 + " / " + r.world.z0 + "</td>" +
         "<td class=num>" + r.n + "</td>" +
-        "<td class=num>" + M.fmtTime(r.lastMs) + "</td>";
+        "<td class='num ts'>" + M.fmtTime(r.lastMs) + "</td>";
       tr.addEventListener("click", function () { if (onPick) onPick(r); });
       tb.appendChild(tr);
     });
@@ -390,7 +391,7 @@ window.DV = window.DV || {};
     items.forEach(function (it) {
       var item = document.createElement("div");
       item.className = "feed__item";
-      item.innerHTML = '<span class="feed__t">' + M.fmtDate(it.ms) + "</span>" +
+      item.innerHTML = '<span class="feed__t ts">' + M.fmtDate(it.ms) + "</span>" +
         '<span class="feed__who" style="font-weight:400">' + esc(it.text) + "</span>" +
         '<span class="feed__tag">' + ico[it.kind] + "</span>";
       item.addEventListener("click", function () { if (onSeek) onSeek(it.ms); });

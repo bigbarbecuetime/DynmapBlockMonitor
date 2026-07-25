@@ -97,6 +97,7 @@
         <label class="chk"><input type="checkbox" id="fillContext"> Also fetch unchanged tiles for context</label>
         <label class="chk"><input type="checkbox" id="showGrid" checked> Tile grid</label>
         <label class="chk"><input type="checkbox" id="showRuler" checked> Coordinate ruler</label>
+        <label class="chk"><input type="checkbox" id="showMarkers" checked> World border &amp; markers</label>
 
         <div class="row" style="margin-top:8px">
           <button class="btn" id="fitBtn" title="Frame all logged tiles (0)">Fit all</button>
@@ -265,7 +266,7 @@
       <button class="btn btn--icon" id="faster" title="Faster (Up arrow)">&raquo;</button>
       <button class="btn btn--icon" id="revBtn" title="Reverse direction (R)">&#8646;</button>
 
-      <span class="dock__time" id="cursorLabel">&mdash;</span>
+      <span class="dock__time ts" id="cursorLabel" title="click to switch between local time and the raw UTC timestamp">&mdash;</span>
 
       <div class="spacer" style="flex:1 1 auto"></div>
 
@@ -290,9 +291,9 @@
       <div class="tip" id="timeTip" hidden></div>
     </div>
     <div class="dock__axis">
-      <span id="axisA">&mdash;</span>
+      <span class="ts" id="axisA">&mdash;</span>
       <span id="axisMid"></span>
-      <span id="axisB">&mdash;</span>
+      <span class="ts" id="axisB">&mdash;</span>
     </div>
   </section>
 

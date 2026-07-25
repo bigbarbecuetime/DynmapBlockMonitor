@@ -26,6 +26,8 @@ import os
 import posixpath
 import re
 import sys
+import urllib.error
+import urllib.request
 import webbrowser
 from functools import partial
 from http import HTTPStatus
@@ -38,8 +40,32 @@ ROOT = Path(__file__).resolve().parent.parent
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
+WORLD_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+
 def _truthy(value):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def dynmap_url():
+    """The Dynmap base URL, from the environment or the tracker's own .env.
+
+    Deliberately NOT taken from the request: /api/markers builds a server-side
+    request out of this, and accepting a caller-supplied host would turn the
+    viewer into an open relay that can be pointed at anything the host can reach.
+    """
+    url = os.environ.get("DYNMAP_URL", "").strip()
+    if not url:
+        envf = ROOT / ".env"
+        try:
+            for line in envf.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("DYNMAP_URL="):
+                    url = line.split("=", 1)[1].strip()
+                    break
+        except OSError:
+            pass
+    return url.rstrip("/")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -49,6 +75,8 @@ class Handler(SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/images":
             return self.api_images()
+        if path == "/api/markers":
+            return self.api_markers()
         if path == "/":
             self.send_response(HTTPStatus.FOUND)
             self.send_header("Location", "/viewer/")
@@ -140,6 +168,53 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---- marker layer ----------------------------------------------------
+
+    def api_markers(self):
+        """Proxy Dynmap's marker layer, which carries the world border.
+
+        Dynmap serves /tiles/_markers_/marker_<world>.json with no
+        Access-Control-Allow-Origin, so the page cannot fetch() it directly from
+        a different origin -- tile <img> loads work because images need no CORS,
+        but JSON does. Hence this hop.
+
+        The world name is the only caller-supplied part, and it is pattern-checked
+        before being pasted into a path; the host comes from DYNMAP_URL.
+        """
+        from urllib.parse import parse_qs, urlparse as _urlparse
+        world = (parse_qs(_urlparse(self.path).query).get("world") or [""])[0]
+        if not WORLD_RE.match(world):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "bad or missing 'world'")
+
+        base = dynmap_url()
+        if not base:
+            return self._json_error(HTTPStatus.SERVICE_UNAVAILABLE,
+                                    "DYNMAP_URL is not set (env or tracker/.env), so markers cannot be fetched")
+
+        url = "%s/tiles/_markers_/marker_%s.json" % (base, world)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "dynmap-viewer"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                body = r.read()
+        except urllib.error.HTTPError as e:
+            return self._json_error(HTTPStatus.BAD_GATEWAY, "dynmap returned %d for %s" % (e.code, url))
+        except Exception as e:
+            return self._json_error(HTTPStatus.BAD_GATEWAY, "could not reach dynmap: %s" % e)
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json_error(self, status, message):
+        body = json.dumps({"error": message}).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 

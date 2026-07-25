@@ -68,6 +68,7 @@ window.DV = window.DV || {};
       dataBase: opts.dataBase || "../data",
       showGrid: true,
       showRuler: true,
+      showMarkers: true,        // Dynmap's marker layer (world border, spawn, ...)
       // view: grid units (gx = tx, gy = -tz) at centre, plus px-per-tile
       gx: 0, gy: 0, scale: 6,
       hover: null, selected: null
@@ -80,6 +81,7 @@ window.DV = window.DV || {};
     var historical = null;       // Set of available data/chunks filenames, or null
     var urlTemplate = null;      // for tiles that never appear in the CSV
     var sessionStamp = Date.now();  // stable cache-buster; bumped only on demand
+    var markers = null;             // Dynmap's marker layer, once fetched
     var suppressedImages = false;
     var needsDraw = false;
 
@@ -401,11 +403,133 @@ window.DV = window.DV || {};
         }
       }
 
+      /* --- server-published markers (world border, spawn) --------------- */
+      drawMarkers();
+
       /* --- selection + hover ------------------------------------------- */
       if (state.selected) outline(state.selected, pal.players, 2);
       if (state.hover) outline(state.hover, pal.text1, 1);
 
       if (state.showRuler) drawRuler(vis);
+    }
+
+    /* ---------------------------------------------------- marker layer ---- */
+
+    /* World coordinates land on the tile grid by a plain divide, because the grid
+       IS world space scaled by the tile size: gx = worldX/bpt and gy = worldZ/bpt
+       (the Z inversion is already baked into gy = -tz). So markers, which Dynmap
+       publishes in raw world coordinates, need no projection of their own. */
+    function worldToScreen(wx, wz) {
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      return toScreen(wx / bpt, wz / bpt);
+    }
+
+    /* Draws whatever Dynmap publishes: areas (the world border is one), lines,
+       circles and point markers. Their own colours are honoured rather than
+       restyled -- this layer is "what the server says", and the world border in
+       particular is meaningful precisely because it is the server's own. */
+    function drawMarkers() {
+      if (!markers || !state.showMarkers) return;
+      var sets = markers.sets || {};
+      ctx.save();
+      for (var name in sets) {
+        var set = sets[name];
+        if (!set || set.hide) continue;
+        eachValue(set.areas, drawArea);
+        eachValue(set.lines, drawLine);
+        eachValue(set.circles, drawCircle);
+        eachValue(set.markers, drawPoint);
+      }
+      ctx.restore();
+    }
+
+    function eachValue(obj, fn) {
+      if (!obj) return;
+      for (var k in obj) if (obj[k]) fn(obj[k], k);
+    }
+
+    function drawArea(a) {
+      if (!a.x || !a.z || a.x.length < 2) return;
+      ctx.beginPath();
+      for (var i = 0; i < a.x.length; i++) {
+        var p = worldToScreen(a.x[i], a.z[i]);
+        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      if (a.fillopacity > 0) {
+        ctx.globalAlpha = a.fillopacity;
+        ctx.fillStyle = a.fillcolor || "#000000";
+        ctx.fill();
+      }
+      ctx.globalAlpha = a.opacity === undefined ? 0.8 : a.opacity;
+      ctx.strokeStyle = a.color || "#ff0000";
+      ctx.lineWidth = Math.max(1, a.weight || 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawLine(l) {
+      if (!l.x || !l.z || l.x.length < 2) return;
+      ctx.beginPath();
+      for (var i = 0; i < l.x.length; i++) {
+        var p = worldToScreen(l.x[i], l.z[i]);
+        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+      ctx.globalAlpha = l.opacity === undefined ? 0.8 : l.opacity;
+      ctx.strokeStyle = l.color || "#ff0000";
+      ctx.lineWidth = Math.max(1, l.weight || 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawCircle(c) {
+      if (c.x === undefined || c.z === undefined) return;
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      var p = worldToScreen(c.x, c.z);
+      var rx = Math.abs((c.xr || 0) / bpt) * state.scale;
+      var rz = Math.abs((c.zr || c.xr || 0) / bpt) * state.scale;
+      if (rx < 0.5 && rz < 0.5) return;
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, rx, rz, 0, 0, 6.2832);
+      if (c.fillopacity > 0) {
+        ctx.globalAlpha = c.fillopacity;
+        ctx.fillStyle = c.fillcolor || "#000000";
+        ctx.fill();
+      }
+      ctx.globalAlpha = c.opacity === undefined ? 0.8 : c.opacity;
+      ctx.strokeStyle = c.color || "#ff0000";
+      ctx.lineWidth = Math.max(1, c.weight || 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    /* Point markers (spawn, and whatever else the server publishes). Drawn as a
+       small ring + label rather than fetching Dynmap's icon sprites, which would
+       be a lot of extra requests for decoration. */
+    function drawPoint(mk) {
+      if (mk.x === undefined || mk.z === undefined) return;
+      var p = worldToScreen(mk.x, mk.z);
+      if (p.x < -40 || p.x > state.w + 40 || p.y < -40 || p.y > state.h + 40) return;
+      ctx.strokeStyle = pal.text1;
+      ctx.fillStyle = pal.surface1;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, 6.2832); ctx.fill(); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(p.x - 7, p.y); ctx.lineTo(p.x + 7, p.y);
+      ctx.moveTo(p.x, p.y - 7); ctx.lineTo(p.x, p.y + 7);
+      ctx.stroke();
+      if (mk.label && state.scale >= 2) {
+        ctx.font = "10px system-ui, -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        var w = ctx.measureText(mk.label).width;
+        ctx.fillStyle = pal.surface1;
+        ctx.globalAlpha = 0.85;
+        ctx.fillRect(p.x - w / 2 - 3, p.y - 22, w + 6, 13);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = pal.text1;
+        ctx.fillText(mk.label, p.x, p.y - 11);
+      }
     }
 
     function outline(cell, color, lw) {
@@ -654,6 +778,22 @@ window.DV = window.DV || {};
       },
       get: function (k) { return state[k]; },
       setHistorical: function (set) { historical = set; images.clear(); invalidate(); },
+      setMarkers: function (data) { markers = data; invalidate(); },
+      markerSummary: function () {
+        if (!markers || !markers.sets) return null;
+        var areas = 0, points = 0, lines = 0, circles = 0, border = null;
+        for (var n in markers.sets) {
+          var s = markers.sets[n];
+          for (var a in (s.areas || {})) {
+            areas++;
+            if (/worldborder/i.test(a)) border = s.areas[a];
+          }
+          for (var p in (s.markers || {})) points++;
+          for (var l in (s.lines || {})) lines++;
+          for (var c in (s.circles || {})) circles++;
+        }
+        return { areas: areas, points: points, lines: lines, circles: circles, border: border };
+      },
       refreshPalette: function () { pal = readPalette(canvas); invalidate(); },
       clearImageCache: function () {
         images.clear(); queue.length = 0;

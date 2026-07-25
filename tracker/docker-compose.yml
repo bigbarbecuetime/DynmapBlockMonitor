@@ -32,9 +32,12 @@ services:
     restart: on-failure
     command: ["python", "viewer/serve.py", "--host", "0.0.0.0", "--port", "8080", "--no-browser"]
     environment:
-      # Only this one is relevant: a static file server has no use for the Dynmap
-      # or Minecraft settings, so .env is deliberately not loaded here.
       HEADLESS: ${HEADLESS:-false}
+      # Needed only by /api/markers, which proxies Dynmap's marker layer (the
+      # world border) because that endpoint sends no CORS headers and the page
+      # therefore cannot fetch it cross-origin itself. The rest of .env is still
+      # deliberately not loaded -- a static file server has no use for it.
+      DYNMAP_URL: ${DYNMAP_URL:-}
     ports:
       # Loopback by default -- the viewer has no authentication and the CSVs carry
       # player names. Set VIEWER_BIND=0.0.0.0 to reach it from your LAN.
