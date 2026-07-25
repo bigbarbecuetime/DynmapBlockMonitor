@@ -99,20 +99,34 @@ _clock_offset = 0.0       # seconds to add to this host's clock
 _offset_samples = []      # recent observations, for drift detection
 
 
-def measure_clock_offset(url, samples=3):
-    """Median offset between the server's HTTP Date and this host's clock."""
+def measure_clock_offset(feed_url, samples=3):
+    """Median offset between the server's clock and this host's.
+
+    Reads the feed's own "timestamp" (epoch ms, the same clock as tile_ts) and
+    only falls back to the HTTP Date header, which is whole seconds, if that is
+    missing. The request is sandwiched between two local readings so the round
+    trip cancels rather than biasing the result.
+    """
     seen = []
     for _ in range(samples):
         try:
             t0 = time.time()
-            req = urllib.request.Request(url, headers={"User-Agent": "dynmap-tracker"})
+            req = urllib.request.Request(feed_url, headers={"User-Agent": "dynmap-tracker"})
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 date = r.headers.get("Date")
-                r.read(1)
+                body = r.read()
             t1 = time.time()
-            if date:
+            served = None
+            try:
+                ts = json.loads(body.decode("utf-8")).get("timestamp")
+                if isinstance(ts, (int, float)):
+                    served = ts / 1000.0
+            except Exception:
+                pass
+            if served is None and date:
                 served = parsedate_to_datetime(date).timestamp()
-                seen.append(served - (t0 + t1) / 2.0)   # midpoint cancels the round trip
+            if served is not None:
+                seen.append(served - (t0 + t1) / 2.0)
         except Exception:
             pass
     if not seen:
@@ -121,14 +135,16 @@ def measure_clock_offset(url, samples=3):
     return seen[len(seen) // 2]
 
 
-def note_server_date(date_header):
-    """Fold a Date header seen on a normal poll into the drift watch."""
+def note_server_time(served):
+    """Fold an observation of the server's own clock into the drift watch.
+
+    `served` is epoch SECONDS as the server reckons them. Prefer the feed's
+    "timestamp" field over the HTTP Date header: it is milliseconds rather than
+    whole seconds, and it is stamped by the same clock as tile_ts, which is the
+    one we are actually trying to agree with.
+    """
     global _clock_offset
-    if not CLOCK_SYNC or not date_header:
-        return None
-    try:
-        served = parsedate_to_datetime(date_header).timestamp()
-    except Exception:
+    if not CLOCK_SYNC or served is None:
         return None
     _offset_samples.append(served - time.time() - _clock_offset)
     if len(_offset_samples) > 30:
@@ -196,12 +212,16 @@ def error_reason(e):
 def fetch_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "dynmap-tracker"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        # Watch the clock on every poll we were making anyway -- no extra request.
-        drift = note_server_date(r.headers.get("Date"))
-        if drift is not None:
-            log(f"clock drifted {drift:+.1f}s against the server; re-anchored")
-            append_chunk({"time": now(), "event": f"clock re-anchored {drift:+.1f}s"})
-        return json.loads(r.read().decode("utf-8"))
+        body = json.loads(r.read().decode("utf-8"))
+    # The response carries the server's own clock in "timestamp" (epoch ms) -- the
+    # very clock tile_ts is stamped against. Use that in preference to anything
+    # local, and to the Date header, which only has whole-second resolution.
+    served = body.get("timestamp")
+    drift = note_server_time(served / 1000.0 if isinstance(served, (int, float)) else None)
+    if drift is not None:
+        log(f"clock drifted {drift:+.1f}s against the server; re-anchored")
+        append_chunk({"time": now(), "event": f"clock re-anchored {drift:+.1f}s"})
+    return body
 
 def save_chunk_image(url, name, tile_ts):
     try:
@@ -318,7 +338,7 @@ def main():
     # after the fact.
     global _clock_offset
     if CLOCK_SYNC:
-        measured = measure_clock_offset(f"{DYNMAP_URL}/up/configuration")
+        measured = measure_clock_offset(f"{DYNMAP_URL}/up/world/{WORLD_NAME}/0")
         if measured is None:
             log("clock sync: could not read a Date header; using this host's clock as-is")
         else:

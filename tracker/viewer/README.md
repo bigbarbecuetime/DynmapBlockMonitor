@@ -139,18 +139,34 @@ writes no row at all.
 
 ## Beyond plotting
 
+**Isometric map types** are drawn through their own projection, not flattened:
+the world grid and the markers go through that map's `worldtomap`, so the world
+border comes out as the rotated diamond Dynmap shows rather than a square, and
+the block-numbered ruler is replaced by the projected world grid (screen axes are
+not world axes once the view is skewed).
+
 **Player tracks** link chunk loads into paths. Dynmap redraws a chunk when it is
 loaded, which is what happens as someone walks into new terrain, so loads are the
 movement signal — and the load/edit split above separates them from building.
+A loaded tile is **not** the player's position. Measured over 42.9h of
+single-player stretches, the tiles loading in any 30s window sit a median 10.8
+tiles (86 blocks, ~5.4 chunks) from the centre of the group — a view-distance
+disc around the player — and one 8×8 tile stands in for its whole 16×16 chunk
+(793 chunks contributed one tile; only 12 contributed all four). So a track is
+the chain of per-slice **centroids**, not of individual tiles. That matters: tile
+linking hops across the disc and inflated speed to 3.8–8.5 blocks/s, while
+centroids give 2.2 median / 3.3 p90 — matching the 2.2 measured directly from
+the solo stretches.
+
 Linking is by proximity in space and time, never by the order tiles arrive: tiles
 come off the feed sorted by ascending x (perfectly ascending in **92%** of polls
 *within a single second*, where time cannot explain it), so emission order
 measures Dynmap's render loop, not player heading.
 
 The check is the roster: the number of live tracks should match the number of
-people online. It agrees exactly **55%** of the time, mean error 0.75 players,
-and errs low — because a player standing still loads nothing and is invisible
-here. Inferred speeds land at 3.8–8.5 blocks/s, which is walking to boating.
+people online. It agrees exactly **55%** of the time (59% at a 30s slice), mean error 0.75
+players, and errs low — a player standing still loads nothing and is invisible
+here.
 
 **Height** comes from crossing the maps. A flat tile fixes X and Z but not Y; the
 isometric maps are shot at inclination 30, folding height into their vertical

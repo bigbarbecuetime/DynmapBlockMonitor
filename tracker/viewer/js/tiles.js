@@ -77,6 +77,8 @@ window.DV = window.DV || {};
          while snapshot URLs still resolved against the old one -- every image
          404'd while the tooltip claimed "saved snapshot from this run". */
       dataBase: opts.dataBase || "../data",
+      mapCfg: null,             // the SELECTED map type's Dynmap projection
+
       showGrid: true,
       showRuler: true,
       showMarkers: true,        // Dynmap's marker layer (world border, spawn, ...)
@@ -482,13 +484,37 @@ window.DV = window.DV || {};
 
     /* ---------------------------------------------------- marker layer ---- */
 
-    /* World coordinates land on the tile grid by a plain divide, because the grid
-       IS world space scaled by the tile size: gx = worldX/bpt and gy = worldZ/bpt
-       (the Z inversion is already baked into gy = -tz). So markers, which Dynmap
-       publishes in raw world coordinates, need no projection of their own. */
-    function worldToScreen(wx, wz) {
-      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
-      return toScreen(wx / bpt, wz / bpt);
+    /* World -> screen THROUGH THE SELECTED MAP'S OWN PROJECTION.
+       A flat overhead map happens to reduce to a plain divide, but an isometric
+       one does not: it rotates and shears, which is why Dynmap draws the world
+       border as a diamond there rather than a square. Using the flat shortcut on
+       an isometric map put every marker in the wrong place. The tile grid is
+       already the map's pixel space divided by the tile size, so:
+
+           gx =  mapX / tileSize        gy = -mapY / tileSize
+
+       (gy is negated for the same reason gy = -tz: higher map Y draws upward.)
+       Height matters on an isometric projection, hence the y argument. */
+    function worldToScreen(wx, wz, wy) {
+      var cfg = state.mapCfg;
+      if (!cfg || !cfg.worldtomap) {
+        var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+        return toScreen(wx / bpt, wz / bpt);
+      }
+      var a = cfg.worldtomap, size = 128 << (parseInt(cfg.tilescale, 10) || 0);
+      var y = wy === undefined ? 64 : wy;
+      var mx = a[0] * wx + a[1] * y + a[2] * wz;
+      var my = a[3] * wx + a[4] * y + a[5] * wz;
+      return toScreen(mx / size, -my / size);
+    }
+
+    /* Is the selected map a straight overhead view? Isometric maps fold height
+       into their vertical axis, so a block-numbered ruler along the screen axes
+       is meaningless on them. */
+    function isFlatProjection() {
+      var cfg = state.mapCfg;
+      if (!cfg || !cfg.worldtomap) return true;
+      return Math.abs(cfg.worldtomap[4]) < 1e-9;   // no y term in mapY
     }
 
     /* Draws whatever Dynmap publishes: areas (the world border is one), lines,
@@ -519,7 +545,7 @@ window.DV = window.DV || {};
       if (!a.x || !a.z || a.x.length < 2) return;
       ctx.beginPath();
       for (var i = 0; i < a.x.length; i++) {
-        var p = worldToScreen(a.x[i], a.z[i]);
+        var p = worldToScreen(a.x[i], a.z[i], a.ytop);
         if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
       }
       ctx.closePath();
@@ -539,7 +565,7 @@ window.DV = window.DV || {};
       if (!l.x || !l.z || l.x.length < 2) return;
       ctx.beginPath();
       for (var i = 0; i < l.x.length; i++) {
-        var p = worldToScreen(l.x[i], l.z[i]);
+        var p = worldToScreen(l.x[i], l.z[i], l.ytop);
         if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
       }
       ctx.globalAlpha = l.opacity === undefined ? 0.8 : l.opacity;
@@ -552,7 +578,7 @@ window.DV = window.DV || {};
     function drawCircle(c) {
       if (c.x === undefined || c.z === undefined) return;
       var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
-      var p = worldToScreen(c.x, c.z);
+      var p = worldToScreen(c.x, c.z, c.ytop);
       var rx = Math.abs((c.xr || 0) / bpt) * state.scale;
       var rz = Math.abs((c.zr || c.xr || 0) / bpt) * state.scale;
       if (rx < 0.5 && rz < 0.5) return;
@@ -575,7 +601,7 @@ window.DV = window.DV || {};
        be a lot of extra requests for decoration. */
     function drawPoint(mk) {
       if (mk.x === undefined || mk.z === undefined) return;
-      var p = worldToScreen(mk.x, mk.z);
+      var p = worldToScreen(mk.x, mk.z, mk.y);
       if (p.x < -40 || p.x > state.w + 40 || p.y < -40 || p.y > state.h + 40) return;
       ctx.strokeStyle = pal.text1;
       ctx.fillStyle = pal.surface1;
@@ -612,9 +638,21 @@ window.DV = window.DV || {};
     function drawRuler(vis) {
       var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
       var w = state.w, h = state.h;
-      ctx.font = "10px " + "ui-monospace, SFMono-Regular, Consolas, monospace";
+      ctx.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
       ctx.fillStyle = pal.text3;
       ctx.textBaseline = "top";
+
+      /* On an isometric map the screen axes are not world axes -- X and Z both
+         run diagonally and height shifts things vertically -- so numbering the
+         edges in blocks would be a lie. Draw the world grid PROJECTED instead,
+         the way Dynmap does, and label the tile numbers. */
+      if (!isFlatProjection()) {
+        drawProjectedWorldGrid();
+        ctx.textAlign = "right";
+        ctx.fillStyle = pal.text3;
+        ctx.fillText("isometric view - world grid projected", w - 4, h - 14);
+        return;
+      }
 
       var stepBlocks = niceStep(bpt * 64 / state.scale);
       var stepTiles = Math.max(1, Math.round(stepBlocks / bpt));
@@ -634,6 +672,40 @@ window.DV = window.DV || {};
       ctx.textAlign = "right";
       ctx.fillStyle = pal.text3;
       ctx.fillText("X →   ↓ Z   (blocks)", w - 4, h - 14);
+    }
+
+    /* Lines of constant world X and constant world Z, run through the map's own
+       projection so they come out skewed -- which is what makes an isometric view
+       readable as a world rather than as a grid of pictures. */
+    function drawProjectedWorldGrid() {
+      var a = toGrid(0, 0), b = toGrid(state.w, state.h);
+      var cfg = state.mapCfg, size = 128 << (parseInt(cfg.tilescale, 10) || 0);
+      // Convert the visible corners back to a generous world box.
+      var reach = Math.max(Math.abs(a.gx), Math.abs(b.gx), Math.abs(a.gy), Math.abs(b.gy)) * size;
+      var scaleGuess = Math.abs(cfg.worldtomap[0]) || 16;
+      var extent = Math.ceil(reach / scaleGuess) + 256;
+      var step = niceStep(extent / 6);
+      if (!(step > 0)) return;
+
+      ctx.strokeStyle = pal.grid;
+      ctx.lineWidth = 1;
+      ctx.font = "10px ui-monospace, SFMono-Regular, Consolas, monospace";
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "left";
+
+      for (var v = -extent; v <= extent; v += step) {
+        // constant X, varying Z
+        var p1 = worldToScreen(v, -extent, 64), p2 = worldToScreen(v, extent, 64);
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        // constant Z, varying X
+        var q1 = worldToScreen(-extent, v, 64), q2 = worldToScreen(extent, v, 64);
+        ctx.beginPath(); ctx.moveTo(q1.x, q1.y); ctx.lineTo(q2.x, q2.y); ctx.stroke();
+      }
+      // Label the two axes where they cross the visible area.
+      ctx.fillStyle = pal.text3;
+      var ox = worldToScreen(extent, 0, 64), oz = worldToScreen(0, extent, 64);
+      if (ox.x > 0 && ox.x < state.w && ox.y > 0 && ox.y < state.h) ctx.fillText("+X", ox.x + 4, ox.y);
+      if (oz.x > 0 && oz.x < state.w && oz.y > 0 && oz.y < state.h) ctx.fillText("+Z", oz.x + 4, oz.y);
     }
 
     function niceStep(v) {
@@ -846,6 +918,7 @@ window.DV = window.DV || {};
       get: function (k) { return state[k]; },
       setHistorical: function (set) { historical = set; images.clear(); invalidate(); },
       setMarkers: function (data) { markers = data; invalidate(); },
+      setMapConfig: function (cfg) { state.mapCfg = cfg || null; invalidate(); },
       setTracks: function (t) { tracks = t; invalidate(); },
       markerSummary: function () {
         if (!markers || !markers.sets) return null;

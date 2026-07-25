@@ -190,47 +190,111 @@ window.DV = window.DV || {};
      that is a falsifiable prediction rather than a picture.
      ======================================================================== */
 
+  /* A loaded tile is NOT where the player is.
+
+     Measured over 42.9h of stretches with exactly one player online: the tiles
+     loading in any 30s window sit a median 10.8 tiles (86 blocks, ~5.4 chunks)
+     from the centre of the group -- a view-distance disc around the player, not
+     a point on their path. And one 8x8 tile stands in for the whole 16x16 chunk
+     it belongs to: of the chunks touched, 793 contributed a single tile and only
+     12 contributed all four.
+
+     So the player's position is estimated as the CENTROID of the tiles loading in
+     a short slice, and the track is the chain of those centroids. Linking raw
+     tiles instead makes the path hop back and forth across the disc, which
+     inflates the apparent speed -- centroid motion comes out at a median 2.2
+     blocks/s (p90 5.8), squarely walking-to-sprinting, whereas tile-to-tile
+     linking suggested 3.8-8.5.
+
+     Chunks, not tiles, are counted: two tiles of the same chunk are one load. */
   function buildTracks(model, opts) {
     opts = opts || {};
-    var maxGapMs = opts.maxGapMs === undefined ? 45000 : opts.maxGapMs;
-    var maxDist = opts.maxDist === undefined ? 24 : opts.maxDist;   // tiles
-    var minPoints = opts.minPoints === undefined ? 4 : opts.minPoints;
+    var sliceMs = opts.sliceMs === undefined ? 20000 : opts.sliceMs;
+    var maxGapMs = opts.maxGapMs === undefined ? 60000 : opts.maxGapMs;
+    // A player cannot cross more than this many tiles between slices. 12 tiles
+    // over 20s is ~4.8 blocks/s, near sprinting; boats and elytra get the slack
+    // from maxDist scaling with the slice length.
+    var maxStep = opts.maxStep === undefined ? Math.max(8, 12 * (sliceMs / 20000)) : opts.maxStep;
+    var clusterRadius = opts.clusterRadius === undefined ? 22 : opts.clusterRadius;
+    var minPoints = opts.minPoints === undefined ? 3 : opts.minPoints;
     var from = opts.from === undefined ? -Infinity : opts.from;
     var to = opts.to === undefined ? Infinity : opts.to;
     var kinds = opts.kind || "load";
 
-    var open = [], done = [], nextId = 1;
-    var tiles = model.tiles;
+    /* ---- 1. slice time, and inside each slice group the loads spatially ---
+       Two players in different places produce two discs in the same slice, so a
+       slice can yield more than one estimate. Single-linkage at roughly twice the
+       view radius keeps one player's disc together without merging two players
+       who happen to be loading at the same moment. */
+    var tiles = model.tiles, nodes = [];
+    var i = M.lowerBound(tiles, from, "tileMs");
+    var slice = [], sliceStart = null;
 
-    for (var i = 0; i < tiles.length; i++) {
-      var t = tiles[i];
-      if (t.tileMs < from || t.tileMs > to) continue;
-      if (kinds !== "all" && t.kind !== kinds) continue;
-
-      // Retire tracks that have gone quiet: they cannot claim this point.
-      for (var k = open.length - 1; k >= 0; k--) {
-        if (t.tileMs - open[k].lastMs > maxGapMs) { done.push(open[k]); open.splice(k, 1); }
+    function flushSlice() {
+      if (!slice.length) return;
+      var groups = clusterTiles(slice, clusterRadius);
+      for (var g = 0; g < groups.length; g++) {
+        var pts = groups[g];
+        // Dedupe to chunks: one tile stands in for its whole chunk.
+        var chunks = new Map();
+        var sx = 0, sz = 0;
+        for (var k = 0; k < pts.length; k++) {
+          chunks.set(pts[k].cx + "," + pts[k].cz, true);
+          sx += pts[k].tx; sz += pts[k].tz;
+        }
+        var cx = sx / pts.length, cz = sz / pts.length;
+        var rad = 0;
+        for (k = 0; k < pts.length; k++) rad += Math.hypot(pts[k].tx - cx, pts[k].tz - cz);
+        nodes.push({
+          ms: sliceStart + sliceMs / 2, cx: cx, cz: cz,
+          tiles: pts.length, chunks: chunks.size,
+          radius: pts.length ? rad / pts.length : 0,
+          online: pts[pts.length - 1].online, roster: pts[pts.length - 1].roster
+        });
       }
+      slice = [];
+    }
 
+    for (; i < tiles.length; i++) {
+      var t = tiles[i];
+      if (t.tileMs > to) break;
+      if (kinds !== "all" && t.kind !== kinds) continue;
+      var bucket = Math.floor(t.tileMs / sliceMs) * sliceMs;
+      if (sliceStart === null) sliceStart = bucket;
+      if (bucket !== sliceStart) { flushSlice(); sliceStart = bucket; }
+      slice.push(t);
+    }
+    flushSlice();
+
+    /* ---- 2. link centroids across slices into tracks ------------------- */
+    var open = [], done = [], nextId = 1;
+    for (var n = 0; n < nodes.length; n++) {
+      var nd = nodes[n];
+      for (var k2 = open.length - 1; k2 >= 0; k2--) {
+        if (nd.ms - open[k2].lastMs > maxGapMs) { done.push(open[k2]); open.splice(k2, 1); }
+      }
       var best = null, bestD = Infinity;
-      for (k = 0; k < open.length; k++) {
-        var d = Math.hypot(t.tx - open[k].lastTx, t.tz - open[k].lastTz);
-        if (d <= maxDist && d < bestD) { bestD = d; best = open[k]; }
+      for (k2 = 0; k2 < open.length; k2++) {
+        var elapsed = Math.max(1, (nd.ms - open[k2].lastMs) / sliceMs);
+        var d = Math.hypot(nd.cx - open[k2].lastTx, nd.cz - open[k2].lastTz);
+        if (d <= maxStep * elapsed && d < bestD) { bestD = d; best = open[k2]; }
       }
       if (!best) {
-        best = { id: nextId++, points: [], startMs: t.tileMs, lastMs: t.tileMs,
-                 lastTx: t.tx, lastTz: t.tz, minTx: t.tx, maxTx: t.tx, minTz: t.tz, maxTz: t.tz,
-                 dist: 0 };
+        best = { id: nextId++, points: [], startMs: nd.ms, lastMs: nd.ms,
+                 lastTx: nd.cx, lastTz: nd.cz, minTx: nd.cx, maxTx: nd.cx,
+                 minTz: nd.cz, maxTz: nd.cz, dist: 0, chunks: 0 };
         open.push(best);
       } else {
         best.dist += bestD;
       }
-      best.points.push({ ms: t.tileMs, tx: t.tx, tz: t.tz, online: t.online, roster: t.roster });
-      best.lastMs = t.tileMs; best.lastTx = t.tx; best.lastTz = t.tz;
-      if (t.tx < best.minTx) best.minTx = t.tx;
-      if (t.tx > best.maxTx) best.maxTx = t.tx;
-      if (t.tz < best.minTz) best.minTz = t.tz;
-      if (t.tz > best.maxTz) best.maxTz = t.tz;
+      best.points.push({ ms: nd.ms, tx: nd.cx, tz: nd.cz, radius: nd.radius,
+                         chunks: nd.chunks, online: nd.online, roster: nd.roster });
+      best.chunks += nd.chunks;
+      best.lastMs = nd.ms; best.lastTx = nd.cx; best.lastTz = nd.cz;
+      if (nd.cx < best.minTx) best.minTx = nd.cx;
+      if (nd.cx > best.maxTx) best.maxTx = nd.cx;
+      if (nd.cz < best.minTz) best.minTz = nd.cz;
+      if (nd.cz > best.maxTz) best.maxTz = nd.cz;
     }
     done = done.concat(open);
 
@@ -240,6 +304,11 @@ window.DV = window.DV || {};
       tr.spanTiles = Math.hypot(tr.maxTx - tr.minTx, tr.maxTz - tr.minTz);
       var bpt = model.blocksPerTile;
       tr.blocksTravelled = Math.round(tr.dist * bpt);
+      // The disc the loads sat in, in blocks -- roughly the render distance, and
+      // the honest error bar on any single position estimate along this path.
+      var rsum = 0;
+      tr.points.forEach(function (p) { rsum += (p.radius || 0); });
+      tr.loadRadiusBlocks = Math.round(rsum / tr.points.length * bpt);
       tr.speedBlocksPerSec = tr.durationMs > 0 ? tr.blocksTravelled / (tr.durationMs / 1000) : 0;
 
       /* Attribution, only where the roster permits it. One player online for the
@@ -258,6 +327,31 @@ window.DV = window.DV || {};
     });
     tracks.sort(function (a, b) { return a.startMs - b.startMs; });
     return tracks;
+  }
+
+  /* Single-linkage grouping within one time slice. Cheap (slices hold a handful
+     of tiles) and it does the one job needed: keep a player's disc together
+     without merging two players who loaded at the same moment. */
+  function clusterTiles(pts, radius) {
+    var groups = [];
+    for (var i = 0; i < pts.length; i++) {
+      var hit = [];
+      for (var g = 0; g < groups.length; g++) {
+        for (var j = 0; j < groups[g].length; j++) {
+          if (Math.hypot(pts[i].tx - groups[g][j].tx, pts[i].tz - groups[g][j].tz) <= radius) {
+            hit.push(g); break;
+          }
+        }
+      }
+      if (!hit.length) { groups.push([pts[i]]); continue; }
+      groups[hit[0]].push(pts[i]);
+      // this point bridges several groups: merge them
+      for (var h = hit.length - 1; h >= 1; h--) {
+        groups[hit[0]] = groups[hit[0]].concat(groups[hit[h]]);
+        groups.splice(hit[h], 1);
+      }
+    }
+    return groups;
   }
 
   /* How well does the track count match the number of people actually online?

@@ -108,6 +108,7 @@
       transport.setWindow(prevWindow.t0, transport.follow ? state.model.bounds.maxMs : prevWindow.t1, true);
       if (transport.follow && prevBounds && prevView) slideView(prevBounds, prevView);
     }
+    applyMapProjection();
     syncMapTypeUI();
     syncSkewUI();
     renderSlow();
@@ -241,6 +242,7 @@
         (world.maps || []).forEach(function (mp) { byPrefix[mp.prefix] = mp; });
         state.mapConfigs = byPrefix;
         state.worldCenter = world.center;
+        applyMapProjection();
       })
       .catch(function () { state.mapConfigs = null; })
       .then(function () { renderSlow(); });
@@ -882,6 +884,16 @@
     map.set({ dataBase: state.dataBase });
     map.clearImageCache();
     $("dropPath").textContent = state.dataBase;
+  }
+
+  /* Tell the renderer which projection the selected map uses. A flat map is a
+     plain scale; an isometric one rotates, shears and folds height in, so markers
+     and the world grid have to go through its matrix or they land in the wrong
+     place entirely. */
+  function applyMapProjection() {
+    var m = state.model;
+    var cfg = (m && state.mapConfigs) ? state.mapConfigs[m.mapType] : null;
+    map.setMapConfig(cfg || null);
   }
 
   /* The map-type picker only earns its space when the log actually holds more
