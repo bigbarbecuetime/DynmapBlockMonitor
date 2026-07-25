@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dynmap tracker viewer</title>
+<link rel="stylesheet" href="css/viewer.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ------------------------------------------------------------- top bar -->
+  <header class="topbar">
+    <div class="brand">
+      <h1>Tracker viewer</h1>
+      <span class="sub">chunks.csv + players.csv</span>
+    </div>
+
+    <span class="pill" id="statusPill"><span class="pill__dot"></span><span id="statusText">no data</span></span>
+
+    <div class="spacer"></div>
+
+    <button class="btn" id="liveBtn" aria-pressed="false" title="Follow the CSVs as the tracker appends to them (L)">
+      <span aria-hidden="true">&#9679;</span> Live
+    </button>
+    <button class="btn" id="loadBtn" title="Load or reload CSV files">Data&hellip;</button>
+    <button class="btn btn--icon" id="themeBtn" title="Switch light / dark theme" aria-label="Switch theme">&#9788;</button>
+  </header>
+
+  <!-- --------------------------------------------------------- left: setup -->
+  <aside class="panel panel--side" id="panelSide" data-active="false">
+
+    <details class="group" open>
+      <summary>Map</summary>
+      <div class="group__body">
+        <!-- Only shown when the log holds more than one map type (MAP_TYPE=""). -->
+        <div class="row" id="mapTypeRow" hidden>
+          <div class="field">
+            <span>Map type</span>
+            <select id="mapTypeSel"></select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <span>Render</span>
+            <div class="segmented" id="modeSeg" role="group" aria-label="Map render mode">
+              <button class="btn" data-mode="heat">Heat</button>
+              <button class="btn" data-mode="hybrid">Both</button>
+              <button class="btn" data-mode="images">Tiles</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <span>Heat measures</span>
+            <select id="heatMetric">
+              <option value="count">Change count in window</option>
+              <option value="recency">Recency (decaying)</option>
+              <option value="last">Most recent change</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <span>Colour scale</span>
+            <select id="heatScale">
+              <option value="sqrt">Square root</option>
+              <option value="linear">Linear</option>
+              <option value="log">Logarithmic</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row" id="halfLifeRow" hidden>
+          <div class="field">
+            <span>Half-life <b id="halfLifeVal">5m</b></span>
+            <input type="range" id="halfLife" min="15" max="3600" step="15" value="300">
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <span>Tile images</span>
+            <select id="imageSource">
+              <option value="auto">Saved snapshot, else live</option>
+              <option value="historical">Saved snapshots only</option>
+              <option value="current">Live from server only</option>
+              <option value="off">Do not load images</option>
+            </select>
+          </div>
+        </div>
+
+        <label class="chk"><input type="checkbox" id="fillContext"> Also fetch unchanged tiles for context</label>
+        <label class="chk"><input type="checkbox" id="showGrid" checked> Tile grid</label>
+        <label class="chk"><input type="checkbox" id="showRuler" checked> Coordinate ruler</label>
+
+        <div class="row" style="margin-top:8px">
+          <button class="btn" id="fitBtn" title="Frame all logged tiles (0)">Fit all</button>
+          <button class="btn btn--icon" id="zoomOut" aria-label="Zoom out">&minus;</button>
+          <button class="btn btn--icon" id="zoomIn" aria-label="Zoom in">+</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="group" open>
+      <summary>Heat legend</summary>
+      <div class="group__body">
+        <div class="legend" id="heatLegend"></div>
+        <p class="hint" id="heatLegendNote"></p>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary>Time base &amp; correlation</summary>
+      <div class="group__body">
+        <p class="hint" style="margin-top:0">
+          Tile times come from Dynmap's clock, player times from the tracker host's.
+          They are not the same clock, so tile times are shifted onto the host clock
+          before anything is compared.
+        </p>
+        <div class="row">
+          <div class="field">
+            <span>Clock offset (s) &mdash; Dynmap ahead by</span>
+            <input type="number" id="skewInput" step="1">
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn" id="skewAuto">Re-estimate</button>
+          <button class="btn" id="skewZero">Use raw times</button>
+        </div>
+        <p class="hint" id="skewNote"></p>
+        <div class="row" style="margin-top:10px">
+          <div class="field">
+            <span>Correlation window (s)</span>
+            <input type="number" id="corrWindow" value="60" min="1" step="10">
+          </div>
+          <div class="field">
+            <span>Blocks per tile</span>
+            <input type="number" id="blocksPerTile" value="8" min="1" step="1">
+          </div>
+        </div>
+        <p class="hint">
+          A native flat tile is 8&times;8 blocks (128&nbsp;px at 16&nbsp;px/block), so a
+          16&times;16 Minecraft chunk is a 2&times;2 group of four tiles &mdash; despite the
+          log being called <code>chunks.csv</code>.
+        </p>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary>Keyboard</summary>
+      <div class="group__body">
+        <p class="hint" style="margin-top:0">
+          <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step to the previous / next logged data point<br>
+          <kbd>Shift</kbd>+<kbd>&larr;&rarr;</kbd> step 25 at a time<br>
+          <kbd>Alt</kbd>+<kbd>&larr;&rarr;</kbd> step player joins / leaves only<br>
+          <kbd>Space</kbd> play / pause &nbsp; <kbd>R</kbd> reverse<br>
+          <kbd>&uarr;</kbd> <kbd>&darr;</kbd> faster / slower<br>
+          <kbd>Home</kbd> <kbd>End</kbd> window start / end<br>
+          <kbd>[</kbd> <kbd>]</kbd> set window start / end to cursor<br>
+          <kbd>L</kbd> live &nbsp; <kbd>H</kbd> heat mode &nbsp; <kbd>0</kbd> fit map<br>
+          <kbd>+</kbd> <kbd>&minus;</kbd> zoom map
+        </p>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary>Data source</summary>
+      <div class="group__body">
+        <div class="row">
+          <div class="field">
+            <span>Folder holding the CSVs</span>
+            <input type="text" id="dataBase" value="../data">
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn" id="reloadBtn">Reload now</button>
+          <div class="field">
+            <span>Live poll (s)</span>
+            <input type="number" id="livePoll" value="5" min="1" step="1">
+          </div>
+        </div>
+        <p class="hint" id="sourceNote"></p>
+      </div>
+    </details>
+  </aside>
+
+  <!-- ------------------------------------------------------------ map stage -->
+  <main class="stage" id="stage" data-active="true">
+    <canvas class="stage__canvas" id="mapCanvas"></canvas>
+
+    <div class="stage__overlay">
+      <div class="stage__badge" id="mapBadge">&mdash;</div>
+      <div class="stage__badge" id="mapWarn" hidden></div>
+    </div>
+
+    <div class="stage__tools">
+      <button class="btn btn--icon" id="zoomIn2" aria-label="Zoom in">+</button>
+      <button class="btn btn--icon" id="zoomOut2" aria-label="Zoom out">&minus;</button>
+      <button class="btn btn--icon" id="fitBtn2" aria-label="Fit all tiles">&#9634;</button>
+    </div>
+
+    <div class="tip" id="mapTip" hidden></div>
+  </main>
+
+  <!-- ------------------------------------------------------ right: readouts -->
+  <aside class="panel panel--right" id="panelRight" data-active="false">
+
+    <details class="group" open>
+      <summary>At the cursor</summary>
+      <div id="nowPanel"></div>
+    </details>
+
+    <details class="group" open>
+      <summary>Joins &amp; leaves <span class="count" id="transCount"></span></summary>
+      <div class="feed" id="transFeed"></div>
+    </details>
+
+    <details class="group">
+      <summary>Player samples</summary>
+      <div class="group__body" id="snapTable"></div>
+    </details>
+
+    <details class="group" open>
+      <summary>Tile / player correlation</summary>
+      <div class="group__body" id="corrPanel"></div>
+    </details>
+
+    <details class="group">
+      <summary>Busiest tiles</summary>
+      <div class="group__body" id="topTiles"></div>
+    </details>
+
+    <details class="group" id="tileGroup">
+      <summary>Selected tile</summary>
+      <div id="tilePanel"></div>
+    </details>
+
+    <details class="group">
+      <summary>Data quality <span class="count" id="qualityCount"></span></summary>
+      <div class="group__body" id="qualityPanel"></div>
+    </details>
+
+    <details class="group">
+      <summary>Events &amp; errors</summary>
+      <div class="feed" id="eventFeed"></div>
+    </details>
+  </aside>
+
+  <!-- --------------------------------------------------------------- dock -->
+  <section class="dock" id="dock">
+    <div class="dock__bar">
+      <button class="btn btn--icon" id="toStart" title="Window start (Home)">&#9198;</button>
+      <button class="btn btn--icon" id="stepBack" title="Previous data point (Left arrow)">&#9194;</button>
+      <button class="btn btn--icon" id="playBtn" title="Play / pause (Space)">&#9205;</button>
+      <button class="btn btn--icon" id="stepFwd" title="Next data point (Right arrow)">&#9193;</button>
+      <button class="btn btn--icon" id="toEnd" title="Window end (End)">&#9197;</button>
+
+      <button class="btn btn--icon" id="slower" title="Slower (Down arrow)">&laquo;</button>
+      <span class="dock__speed" id="speedLabel">60&times;</span>
+      <button class="btn btn--icon" id="faster" title="Faster (Up arrow)">&raquo;</button>
+      <button class="btn btn--icon" id="revBtn" title="Reverse direction (R)">&#8646;</button>
+
+      <span class="dock__time" id="cursorLabel">&mdash;</span>
+
+      <div class="spacer" style="flex:1 1 auto"></div>
+
+      <label class="chk only-desktop" style="margin:0"><input type="checkbox" id="loopChk" checked> Loop</label>
+
+      <input type="datetime-local" id="rangeFrom" step="1" title="Window start" style="width:172px">
+      <input type="datetime-local" id="rangeTo" step="1" title="Window end" style="width:172px">
+      <button class="btn" id="rangeAll" title="Select the whole file">All</button>
+      <select id="rangePreset" title="Window length ending at the cursor" style="width:auto">
+        <option value="">Length&hellip;</option>
+        <option value="60">1 minute</option>
+        <option value="300">5 minutes</option>
+        <option value="900">15 minutes</option>
+        <option value="3600">1 hour</option>
+        <option value="21600">6 hours</option>
+        <option value="86400">24 hours</option>
+      </select>
+    </div>
+
+    <div class="dock__chart">
+      <canvas id="timeCanvas"></canvas>
+      <div class="tip" id="timeTip" hidden></div>
+    </div>
+    <div class="dock__axis">
+      <span id="axisA">&mdash;</span>
+      <span id="axisMid"></span>
+      <span id="axisB">&mdash;</span>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------- mobile tabs -->
+  <nav class="mtabs" id="mtabs" role="tablist" aria-label="Views">
+    <button role="tab" data-view="map" aria-selected="true"><span class="ico" aria-hidden="true">&#9707;</span>Map</button>
+    <button role="tab" data-view="right" aria-selected="false"><span class="ico" aria-hidden="true">&#9776;</span>Readouts</button>
+    <button role="tab" data-view="side" aria-selected="false"><span class="ico" aria-hidden="true">&#9881;</span>Controls</button>
+  </nav>
+</div>
+
+<!-- ------------------------------------------------------------- data loader -->
+<div class="drop" id="drop">
+  <div class="drop__card">
+    <h2>Load tracker data</h2>
+    <p>
+      Drop <code>chunks.csv</code> and <code>players.csv</code> anywhere on this page, or pick them below.
+      If you are serving this folder over HTTP, <b>Load from server</b> reads them straight from
+      <code id="dropPath">../data</code> and enables live follow.
+    </p>
+
+    <div class="drop__files">
+      <label class="drop__file" id="dropChunks">
+        <input type="file" id="fileChunks" accept=".csv,text/csv">
+        <span>chunks.csv &mdash; tile changes</span>
+        <span class="name">choose&hellip;</span>
+      </label>
+      <label class="drop__file" id="dropPlayers">
+        <input type="file" id="filePlayers" accept=".csv,text/csv">
+        <span>players.csv &mdash; player counts</span>
+        <span class="name">choose&hellip;</span>
+      </label>
+    </div>
+
+    <div class="row">
+      <button class="btn" id="serverLoad">Load from server</button>
+      <button class="btn" id="dropClose">Close</button>
+    </div>
+    <div class="drop__err" id="dropErr"></div>
+    <p class="hint">
+      Opened straight from disk (<code>file://</code>) the browser will not let the page read
+      the folder, so use the file pickers. Serve the tracker folder to get live mode:
+      <code>python viewer/serve.py</code>
+    </p>
+  </div>
+</div>
+
+<script src="js/csv.js"></script>
+<script src="js/model.js"></script>
+<script src="js/tiles.js"></script>
+<script src="js/timeline.js"></script>
+<script src="js/panels.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

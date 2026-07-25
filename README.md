@@ -111,6 +111,28 @@ cp .env.example .env    # then fill it in
 docker compose up --build
 ```
 
+### Viewing the data
+
+The CSVs open in Excel/Sheets, but [`tracker/viewer/`](tracker/viewer/README.md) is a
+dependency-free static page that plots them properly:
+
+```bash
+python viewer/serve.py
+```
+
+A pan/zoom map of which tiles changed (heatmap or real tile art), the player count and
+join/leave feed on a shared timeline, arrow-key stepping through individual data points,
+replay at 1x-3600x forwards or backwards, and a live mode that follows the CSVs as the
+tracker appends to them. Desktop and mobile layouts.
+
+Its main job is to make the two sources comparable: tile timestamps come from **Dynmap's**
+clock and player timestamps from the **tracker host's**, and on the reference server those
+are ~17 s apart, so plotting both raw columns misaligns them and mis-orders events across
+sources. The viewer estimates the offset, corrects it, and flags the things that can make
+the picture lie — tracker downtime, poll outages that outlasted the feed's retention
+buffer, capped player-name samples, and snapshots whose roster contradicts their own count.
+See its [README](tracker/viewer/README.md) for the details.
+
 ---
 
 ## WIP Block Monitor
@@ -172,6 +194,7 @@ npm start
 
 ```
 tracker/         Tiny standalone Python poller (player count + chunk changes)
+tracker/viewer/  Static page for exploring the tracker's CSVs (map, timeline, replay)
 server/          Express API, Dynmap poller, change detector, Discord alerter, SQLite
 client/          React + Tailwind + Vite frontend
 data/            Persisted SQLite DB and alert images (gitignored)
