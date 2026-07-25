@@ -301,6 +301,35 @@ window.DV = window.DV || {};
       samples: lags.length
     };
 
+    /* ==========================================================================
+       CHUNK COORDINATES AND EVENT CLASSIFICATION
+       --------------------------------------------------------------------------
+       Measured on 9,943 logged tiles from this server:
+
+         * 68.5% of distinct lit tiles have BOTH coordinates even, where an even
+           spread would be 25%. A Minecraft chunk is a 2x2 group of tiles, and the
+           even/even member is the chunk-aligned corner -- the same coordinate
+           Dynmap gives the zoomed LOD tile that covers the group.
+         * Split by whether a neighbouring tile changed at nearly the same time:
+           ISOLATED events are 91.1% chunk-aligned; CLUSTERED events are close to
+           uniform (36/21/25/18). So the lattice and the neighbour-touching events
+           are two different populations, not one.
+         * In a live capture, 23 of 24 chunk-aligned groups had exactly ONE of
+           their four tiles change -- chunk granularity, not block granularity.
+         * Re-fetching the images: 7 of 8 re-renders of a chunk-aligned tile came
+           back BYTE-IDENTICAL. Nothing about them changed visually.
+
+       So a chunk-aligned tile that changed alone is very probably Dynmap
+       re-rendering a chunk that was loaded (players moving), not a block edit.
+       That is ~74% of this log, and it swamps the heatmap if left in.
+
+       This is a HEURISTIC and named like one: "likely". A real edit that happens
+       to fall on a chunk-aligned tile with no neighbour activity is
+       indistinguishable here, and would be misfiled as a load. Confirming an edit
+       properly means diffing the tile images, which needs SAVE_IMAGES=true.
+       ======================================================================== */
+    var neighbourMs = opts.neighbourMs === undefined ? 60000 : opts.neighbourMs;
+
     /* ---- per-tile aggregate ------------------------------------------- */
     var tileIndex = new Map();
     var tb = { minTx: Infinity, maxTx: -Infinity, minTz: Infinity, maxTz: -Infinity };
