@@ -291,13 +291,22 @@ window.DV = window.DV || {};
 
   function buildTracks(model, opts) {
     opts = opts || {};
-    var sliceMs = opts.sliceMs === undefined ? 20000 : opts.sliceMs;
+    /* 60s, not 20s. The calibration session showed why: per-20s-slice centroids
+       of a STANDING player hop 100-200 blocks between disc fragments (phantom
+       "sprinting"), while per-60s centroids wander only 12-36 blocks. Coarser
+       time, but the signal has no better native precision anyway -- and the
+       session ground truth scores 60s best on every metric (fewest spurious
+       tracks, best roster agreement, no phantom modes). */
+    var sliceMs = opts.sliceMs === undefined ? 60000 : opts.sliceMs;
     var maxGapMs = opts.maxGapMs === undefined ? 60000 : opts.maxGapMs;
     // A player cannot cross more than this many tiles between slices. 12 tiles
     // over 20s is ~4.8 blocks/s, near sprinting; boats and elytra get the slack
     // from maxDist scaling with the slice length.
-    // In BLOCKS now: ~96 blocks over 20s is about 4.8 b/s, near sprinting.
-    var maxStep = opts.maxStep === undefined ? Math.max(64, 96 * (sliceMs / 20000)) : opts.maxStep;
+    /* 9 blocks/s of allowed travel between slices: above sprint-jumping (7.1)
+       and boats (8), below ice boats and elytra -- those are supposed to break
+       the track and surface as events. The old 4.8 b/s cap silently broke tracks
+       on an ordinary sprint. */
+    var maxStep = opts.maxStep === undefined ? Math.max(64, 9 * (sliceMs / 1000)) : opts.maxStep;
     // Twice the measured load-disc radius (86 blocks), so one player's disc
     // stays whole while two players in different places stay apart.
     var clusterRadius = opts.clusterRadius === undefined ? 176 : opts.clusterRadius;
@@ -358,7 +367,15 @@ window.DV = window.DV || {};
           ms: sliceStart + sliceMs / 2, cx: cx, cz: cz,      // WORLD blocks
           tiles: grp.length, chunks: chunks.size, maps: maps,
           radius: grp.length ? rad / grp.length : 0,          // blocks
-          err: Math.sqrt(1 / sw), loose: looseOnly,
+          /* NOT the formal sqrt(1/sum-weights): that says 2 blocks with fifteen
+             8-block tiles, and a calibration session (standing at a known spot,
+             (2174,63,-4837)) measured the real error at 64-152 blocks. The loads
+             are not scattered evenly around the player -- they follow tickable
+             terrain, which sat ~110 blocks north of the player for the whole
+             session -- so the bias does not shrink with more samples. The honest
+             uncertainty is tied to the disc radius itself. */
+          err: Math.max(Math.sqrt(1 / sw), (grp.length ? rad / grp.length : 0) * 0.6, 12),
+          loose: looseOnly,
           online: grp[grp.length - 1].online, roster: grp[grp.length - 1].roster
         });
       }
@@ -405,7 +422,7 @@ window.DV = window.DV || {};
       } else {
         best.dist += bestD;
       }
-      best.points.push({ ms: nd.ms, tx: nd.cx, tz: nd.cz, radius: nd.radius,
+      best.points.push({ ms: nd.ms, tx: nd.cx, tz: nd.cz, radius: nd.radius, err: nd.err,
                          chunks: nd.chunks, online: nd.online, roster: nd.roster });
       best.chunks += nd.chunks;
       best.lastMs = nd.ms; best.lastTx = nd.cx; best.lastTz = nd.cz;
@@ -415,6 +432,82 @@ window.DV = window.DV || {};
       if (nd.cz > best.maxTz) best.maxTz = nd.cz;
     }
     done = done.concat(open);
+
+    /* MERGE PARALLEL TRACKS. One player's load disc is sparse -- a 20s slice
+       holds a median of four tiles spread across a couple of hundred blocks --
+       so single-linkage inside a slice often splits the disc into fragments, and
+       the linker then runs several tracks side by side through the same area at
+       the same time. The calibration session made it concrete: one player
+       standing still produced FOUR overlapping tracks. Two tracks that overlap
+       in time with mean positions inside one cluster radius are the same disc,
+       so fold them together. Two players genuinely that close are one track
+       anyway -- this signal cannot tell them apart, and pretending otherwise is
+       how you get five tracks for three players. */
+    function meanPos(tr) {
+      // Cached: the merge loop reads means inside an O(n^2) pair scan, and
+      // recomputing over the full point list each time made the whole build
+      // forty times slower than the linking it was cleaning up after.
+      if (!tr._mean) {
+        var sx = 0, sz = 0;
+        for (var q = 0; q < tr.points.length; q++) { sx += tr.points[q].tx; sz += tr.points[q].tz; }
+        tr._mean = { x: sx / tr.points.length, z: sz / tr.points.length };
+      }
+      return tr._mean;
+    }
+    var merged = true;
+    while (merged) {
+      merged = false;
+      for (var a2 = 0; a2 < done.length; a2++) {
+        for (var b2 = a2 + 1; b2 < done.length; b2++) {
+          var A = done[a2], B = done[b2];
+          var overlap = Math.min(A.lastMs, B.lastMs) - Math.max(A.startMs, B.startMs);
+          if (overlap <= 0) continue;
+          var pa = meanPos(A), pb = meanPos(B);
+          if (Math.hypot(pa.x - pb.x, pa.z - pb.z) > clusterRadius) continue;
+          // fold B into A and recompute everything derived from the points
+          A.points = A.points.concat(B.points).sort(function (u, v) { return u.ms - v.ms; });
+          /* Fragments from one build share slice midpoints, so after the sort the
+             merged list holds PAIRS at the same instant. Left alone they zigzag
+             the distance sum (the path would hop fragment-to-fragment every
+             slice); coalesce same-instant points into one err-weighted estimate
+             instead. */
+          var co = [];
+          for (var q3 = 0; q3 < A.points.length; q3++) {
+            var last = co[co.length - 1];
+            if (last && A.points[q3].ms === last.ms) {
+              var w1 = 1 / Math.max(1, last.err * last.err);
+              var w2 = 1 / Math.max(1, A.points[q3].err * A.points[q3].err);
+              last.tx = (last.tx * w1 + A.points[q3].tx * w2) / (w1 + w2);
+              last.tz = (last.tz * w1 + A.points[q3].tz * w2) / (w1 + w2);
+              last.radius = Math.max(last.radius || 0, A.points[q3].radius || 0,
+                                     Math.hypot(last.tx - A.points[q3].tx, last.tz - A.points[q3].tz));
+              last.err = Math.max(last.err, A.points[q3].err);
+              last.chunks = (last.chunks || 0) + (A.points[q3].chunks || 0);
+            } else {
+              co.push(A.points[q3]);
+            }
+          }
+          A.points = co;
+          A._mean = null;
+          A.startMs = A.points[0].ms;
+          A.lastMs = A.points[A.points.length - 1].ms;
+          A.lastTx = A.points[A.points.length - 1].tx;
+          A.lastTz = A.points[A.points.length - 1].tz;
+          A.chunks += B.chunks;
+          A.minTx = Math.min(A.minTx, B.minTx); A.maxTx = Math.max(A.maxTx, B.maxTx);
+          A.minTz = Math.min(A.minTz, B.minTz); A.maxTz = Math.max(A.maxTz, B.maxTz);
+          A.dist = 0;
+          for (var q2 = 1; q2 < A.points.length; q2++) {
+            A.dist += Math.hypot(A.points[q2].tx - A.points[q2 - 1].tx,
+                                 A.points[q2].tz - A.points[q2 - 1].tz);
+          }
+          done.splice(b2, 1);
+          merged = true;
+          b2--;               // keep scanning against the grown A in place --
+          continue;           // restarting the whole sweep per merge was O(n^3)
+        }
+      }
+    }
 
     var tracks = done.filter(function (tr) { return tr.points.length >= minPoints; });
     tracks.forEach(function (tr) {
@@ -526,7 +619,11 @@ window.DV = window.DV || {};
   function annotateTrack(tr, model, opts) {
     opts = opts || {};
     var bpt = model.blocksPerTile;
-    var gapMs = opts.stationaryGapMs === undefined ? 45000 : opts.stationaryGapMs;
+    // A leg one slice long is continuous observation, not a gap; the threshold
+    // must scale with the slicing or coarser slices turn all walking into
+    // "unobserved" (measured: 67% of all time, walking 0%).
+    var slice = opts.sliceMs === undefined ? 60000 : opts.sliceMs;
+    var gapMs = opts.stationaryGapMs === undefined ? Math.max(45000, slice * 1.75) : opts.stationaryGapMs;
     var portals = opts.portals || null;
     var legs = [], events = [], modeTime = {};
 
@@ -537,6 +634,20 @@ window.DV = window.DV || {};
       if (dt <= 0) continue;
       var bps = dist / dt;
       var gapped = (b.ms - a.ms) > gapMs;
+
+      /* RESOLUTION LIMIT, measured not assumed. In the calibration session the
+         centroid of a STANDING player's loads wandered 12-36 blocks per minute,
+         and a real 52-block sprint plus a 64-block walk both stayed inside that
+         noise -- movement smaller than the combined position error of the two
+         estimates is indistinguishable from standing still. So a leg is only
+         called movement when the displacement clears that bar; below it, the
+         honest label is stationary, whatever the raw speed arithmetic says. */
+      var sig = Math.max(24, Math.hypot(a.err || 0, b.err || 0));
+      if (dist < sig && bps < 80) {
+        legs.push({ ms: a.ms, mode: "stationary", bps: bps, blocks: Math.round(dist), belowNoise: true });
+        modeTime.stationary = (modeTime.stationary || 0) + dt;
+        continue;
+      }
 
       /* Only an IMPOSSIBLE speed is an event. A gap on its own is not: losing
          sight of someone for a minute while they walk 70 blocks is just a quiet
@@ -700,9 +811,9 @@ window.DV = window.DV || {};
      estimate is itself good to about that, which needs enough loads to average
      the disc down. */
   function positionError(point) {
+    if (point && point.err) return point.err;
     var r = (point && point.radius) || 0;              // blocks
-    var n = Math.max(1, (point && point.chunks) || 1);
-    return r / Math.sqrt(n);
+    return Math.max(12, r * 0.6);
   }
 
   /* How well does the track count match the number of people actually online?

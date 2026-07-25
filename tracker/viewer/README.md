@@ -186,6 +186,17 @@ not world axes once the view is skewed).
 **Player tracks** link chunk loads into paths. Dynmap redraws a chunk when it is
 loaded, which is what happens as someone walks into new terrain, so loads are the
 movement signal — and the load/edit split above separates them from building.
+A calibration session (standing at a known spot, then a 52-block sprint, then a
+64-block walk) set the resolution limits: the load disc's centroid tracked the
+player's X almost exactly but carried a **~110-block standing bias** in Z —
+loads follow tickable terrain, which is not symmetric around the player, so the
+bias does not average out. Movements smaller than the combined position error
+(~85 blocks) are **below the noise floor** and are reported as `stationary`
+rather than invented as walking. Tracks are built from 60-second slices because
+the same session showed 20-second centroids hopping 100–200 blocks between disc
+fragments (phantom "sprinting" for a standing player) while 60-second centroids
+wander only 12–36.
+
 A loaded tile is **not** the player's position. Measured over 42.9h of
 single-player stretches, the tiles loading in any 30s window sit a median 10.8
 tiles (86 blocks, ~5.4 chunks) from the centre of the group — a view-distance
