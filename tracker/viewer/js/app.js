@@ -26,7 +26,9 @@
     dataBase: "../data",
     mapType: null,           // null = let the model pick the most-logged type
     mapConfigs: null,        // per-map projection matrices, for height inference
-    tracks: null, trackScore: null,
+    tracks: null, trackScore: null, trackEvents: null,
+    portals: null, highways: null,
+    politicalDate: '', politicalDates: null,
     parseCache: {},          // memoised row parse, reused across rebuilds
     live: false, livePollMs: 5000, liveTimer: 0,
     tailChunks: null, tailPlayers: null,
@@ -47,7 +49,8 @@
         mode: map.get("mode"), heatMetric: map.get("heatMetric"), heatScale: map.get("heatScale"),
         halfLifeMs: map.get("halfLifeMs"), imageSource: map.get("imageSource"),
         fillContext: map.get("fillContext"), showGrid: map.get("showGrid"), showRuler: map.get("showRuler"),
-        showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"), showTracks: map.get("showTracks"),
+        showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"),
+        showPortals: map.get("showPortals"), politicalDate: state.politicalDate,
         skewOverride: state.skewOverride, blocksPerTile: state.blocksPerTile, mapType: state.mapType,
         corrWindowMs: state.corrWindowMs, dataBase: state.dataBase, livePollMs: state.livePollMs,
         theme: document.documentElement.getAttribute("data-theme") || "",
@@ -168,6 +171,8 @@
       })
       .then(loadMarkers)
       .then(loadMapConfig)
+      .then(loadPoliticalDates)
+      .then(loadNelt)
       .then(function () { return true; })          // loaded and drawn
       .catch(function (e) {
         if (e === HANDLED) return false;
@@ -246,6 +251,55 @@
       })
       .catch(function () { state.mapConfigs = null; })
       .then(function () { renderSlow(); });
+  }
+
+  /* The Nelt: public nether portals and the highway, proxied because the source
+     sends no CORS headers. Coordinates there are NETHER, so x8 for overworld. */
+  function loadNelt() {
+    return Promise.all([
+      fetch("/api/nelt/map", { cache: "no-store" }).then(function (r) { return r.text(); }),
+      fetch("/api/nelt/lines", { cache: "no-store" }).then(function (r) { return r.text(); })
+    ]).then(function (r) {
+      state.portals = DV.infer.parsePortals(r[0]);
+      state.highways = DV.infer.parseHighways(r[1]);
+      map.setNelt(state.portals, state.highways);
+      renderSlow();
+    }).catch(function () { state.portals = null; state.highways = null; });
+  }
+
+  /* Historical political maps. One pixel per block and world-aligned, so they sit
+     under the tile grid with no projection -- see drawPolitical in tiles.js. */
+  function loadPoliticalDates() {
+    return fetch("/api/political/dates", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (dates) {
+        state.politicalDates = dates;
+        var sel = $("politicalDate");
+        sel.innerHTML = '<option value="">off</option>';
+        dates.slice().reverse().forEach(function (d) {
+          var o = document.createElement("option");
+          o.value = d; o.textContent = d;
+          sel.appendChild(o);
+        });
+        if (state.politicalDate) sel.value = state.politicalDate;
+      })
+      .catch(function () { state.politicalDates = null; });
+  }
+
+  function setPolitical(date) {
+    state.politicalDate = date || "";
+    if (!date) { map.setPolitical(null); return; }
+    fetch("/api/political/" + date + "/tile_list.txt", { cache: "no-store" })
+      .then(function (r) { return r.text(); })
+      .then(function (txt) {
+        var names = new Set(txt.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean));
+        map.setPolitical({
+          date: date, tiles: names, opacity: 0.55,
+          // Tiles load straight from the source: an <img> needs no CORS.
+          base: "https://craftix.cx/mccivmap/elgeis/political/" + date
+        });
+      })
+      .catch(function () { map.setPolitical(null); });
   }
 
   function readFile(file) {
@@ -417,12 +471,13 @@
       lastModelRendered = m;
       // Tracks: only built when asked for -- linking is O(tiles) and pointless
     // unless the layer or the panel is actually being looked at.
-    if (map.get("showTracks")) {
+    if (map.get("mode") === "tracks") {
       state.tracks = DV.infer.buildTracks(m, { maxGapMs: 60000, maxDist: 32, from: w.t0, to: w.t1 });
       state.trackScore = DV.infer.scoreTracks(m, state.tracks, { from: w.t0, to: w.t1 });
-      map.setTracks(state.tracks);
+      state.trackEvents = DV.infer.linkEvents(state.tracks, m, { portals: state.portals });
+      map.setTracks(state.tracks, state.trackEvents);
     } else {
-      state.tracks = null; state.trackScore = null; map.setTracks(null);
+      state.tracks = null; state.trackScore = null; state.trackEvents = null; map.setTracks(null, null);
     }
     P.renderTracks($("tracksPanel"), state.tracks, state.trackScore, m, function (tr) {
       map.centerOn(tr.points[0].tx, tr.points[0].tz, Math.max(map.view().scale, 4));
@@ -759,7 +814,7 @@
       showRuler: s.showRuler !== false,
       showMarkers: s.showMarkers !== false,
       tileKinds: s.tileKinds || "all",
-      showTracks: !!s.showTracks
+      showPortals: !!s.showPortals
     });
     if (typeof s.speedIdx === "number") transport.setSpeedIndex(s.speedIdx);
     if (s.loop === false) transport.setLoop(false);
@@ -856,7 +911,7 @@
     $("showRuler").checked = map.get("showRuler");
     $("showMarkers").checked = map.get("showMarkers");
     $("tileKinds").value = map.get("tileKinds");
-    $("showTracks").checked = map.get("showTracks");
+    $("showPortals").checked = map.get("showPortals");
     $("halfLife").value = Math.round(map.get("halfLifeMs") / 1000);
     $("halfLifeVal").textContent = M.fmtDur(map.get("halfLifeMs"));
     $("halfLifeRow").hidden = map.get("heatMetric") !== "recency";
@@ -1001,9 +1056,13 @@
     $("showGrid").addEventListener("change", function () { map.set({ showGrid: this.checked }); saveSettings(); });
     $("showRuler").addEventListener("change", function () { map.set({ showRuler: this.checked }); saveSettings(); });
     $("showMarkers").addEventListener("change", function () { map.set({ showMarkers: this.checked }); saveSettings(); });
-    $("showTracks").addEventListener("change", function () {
-      map.set({ showTracks: this.checked });
-      invalidatePanels(); renderSlow(); saveSettings();
+    $("showPortals").addEventListener("change", function () {
+      map.set({ showPortals: this.checked });
+      saveSettings();
+    });
+    $("politicalDate").addEventListener("change", function () {
+      setPolitical(this.value);
+      saveSettings();
     });
 
     $("fitBtn").addEventListener("click", function () { map.fit(); });

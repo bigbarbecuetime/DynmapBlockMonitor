@@ -325,6 +325,8 @@ window.DV = window.DV || {};
       tr.player = (soloAll && tr.candidates.length === 1) ? tr.candidates[0] : null;
       tr.confident = !!tr.player;
     });
+    // Label every leg and lift the impossible ones out as events.
+    tracks.forEach(function (tr) { annotateTrack(tr, model, opts); });
     tracks.sort(function (a, b) { return a.startMs - b.startMs; });
     return tracks;
   }
@@ -354,6 +356,212 @@ window.DV = window.DV || {};
     return groups;
   }
 
+  /* ==========================================================================
+     HOW a player moved, and the EVENTS between
+     --------------------------------------------------------------------------
+     Speeds are measured, not assumed. Over 42.7h of single-player stretches the
+     centroid-to-centroid speed distribution came out:
+
+         p10 0.9 | p25 2.4 | p50 4.5 | p75 7.3 | p90 10.6 | p95 16.5 | p99 129
+
+     The median of 4.5 blocks/s is Minecraft's walking speed (4.317), which is
+     the strongest evidence available that these paths are real movement and not
+     an artefact. The bands below are cut at the game's own speeds.
+
+     The 1% above 80 b/s cannot be a player moving through the overworld at all,
+     so it is an EVENT rather than travel. Two kinds are distinguishable:
+
+       * dimension change -- loads stop entirely, then resume far away. The
+         nether is 8:1, so a 500-block overworld jump is only ~60 blocks walked;
+         of the 7 such reappearances in this data the implied nether speed is
+         3.1 b/s, i.e. an ordinary walk. Overworld loads stop because the player
+         is not in the overworld to cause any.
+       * teleport -- a jump with no gap in loading. An ender pearl is capped at
+         about 50 blocks, so a long instant jump is a command or a portal pair.
+
+     And a player standing still generates NO loads: only 71% of 20s slices in a
+     solo stretch contain any. Silence is therefore information, and the gap is
+     labelled "stationary" rather than being drawn as a straight line across the
+     map to wherever they turned up next.
+     ======================================================================== */
+
+  var MODES = [
+    { name: "stationary", max: 1.0,  note: "not moving; the loads are the edge of the disc flickering" },
+    { name: "walking",    max: 5.0,  note: "walking is 4.3 blocks/s" },
+    { name: "sprinting",  max: 8.0,  note: "sprinting 5.6, sprint-jumping ~7.1" },
+    { name: "horse/boat", max: 15.0, note: "boat 8, horse up to ~14" },
+    { name: "fast",       max: 80.0, note: "ice boat or elytra" },
+    { name: "event",      max: Infinity, note: "faster than anything on foot: a teleport or a dimension change" }
+  ];
+  // Not a speed band: assigned when loading stopped long enough that we simply
+  // did not observe the movement, however ordinary it may have been.
+  var UNOBSERVED = { name: "unobserved", note: "no loads for a while -- they were still, elsewhere, or in another dimension" };
+
+  function classifySpeed(bps) {
+    for (var i = 0; i < MODES.length; i++) if (bps < MODES[i].max) return MODES[i].name;
+    return "event";
+  }
+
+  /* Walk a track's points and label each leg, turning the impossible ones into
+     events. `portals` (from the Nelt tables, in NETHER coordinates) lets a
+     dimension change name the portal it probably came out of. */
+  function annotateTrack(tr, model, opts) {
+    opts = opts || {};
+    var bpt = model.blocksPerTile;
+    var gapMs = opts.stationaryGapMs === undefined ? 45000 : opts.stationaryGapMs;
+    var portals = opts.portals || null;
+    var legs = [], events = [], modeTime = {};
+
+    for (var i = 1; i < tr.points.length; i++) {
+      var a = tr.points[i - 1], b = tr.points[i];
+      var dt = (b.ms - a.ms) / 1000;
+      var dist = Math.hypot(b.tx - a.tx, b.tz - a.tz) * bpt;
+      if (dt <= 0) continue;
+      var bps = dist / dt;
+      var gapped = (b.ms - a.ms) > gapMs;
+
+      /* Only an IMPOSSIBLE speed is an event. A gap on its own is not: losing
+         sight of someone for a minute while they walk 70 blocks is just a quiet
+         minute, and calling that a dimension change (an earlier version did)
+         labelled a quarter of all track time as teleporting. What a gap does
+         cost is certainty -- we did not see how they got there -- so a plausible
+         move across a gap is "unobserved" rather than a claim about walking. */
+      var mode;
+      if (bps >= 80) mode = "event";
+      else if (gapped) mode = (dist < bpt * 2) ? "stationary" : "unobserved";
+      else mode = classifySpeed(bps);
+
+      if (mode === "event") {
+        var ev = {
+          ms: a.ms, endMs: b.ms, fromTx: a.tx, fromTz: a.tz, toTx: b.tx, toTz: b.tz,
+          blocks: Math.round(dist), gapSec: Math.round(dt), bps: bps,
+          kind: gapped ? "dimension" : "teleport"
+        };
+        /* Through the nether the same journey is an eighth as far. That only
+           EXPLAINS the jump if the implied nether pace is itself a pace someone
+           could travel at -- too slow and they never needed the nether, too fast
+           and the nether does not account for it either. */
+        ev.netherBps = (dist / 8) / dt;
+        if (ev.kind === "dimension" && ev.netherBps >= 2 && ev.netherBps <= 40) {
+          ev.explains = "consistent with the nether at " + ev.netherBps.toFixed(1) +
+            " blocks/s (8:1, so " + Math.round(dist / 8) + " blocks travelled there)";
+        }
+        if (dist <= 50 && dt < 5) { ev.kind = "pearl"; ev.explains = "within ender-pearl range"; }
+        if (portals) {
+          ev.nearestPortal = nearestPortal(portals, b.tx * bpt, b.tz * bpt);
+          if (ev.nearestPortal && ev.nearestPortal.distBlocks < 256) {
+            ev.explains = (ev.explains ? ev.explains + "; " : "") +
+              "arrives " + Math.round(ev.nearestPortal.distBlocks) + " blocks from the public portal \"" +
+              ev.nearestPortal.name + "\"";
+          }
+        }
+        events.push(ev);
+      }
+      legs.push({ ms: a.ms, mode: mode, bps: bps, blocks: Math.round(dist) });
+      modeTime[mode] = (modeTime[mode] || 0) + dt;
+    }
+
+    tr.legs = legs;
+    tr.events = events;
+    tr.modeTime = modeTime;
+    var best = null;
+    for (var m in modeTime) if (!best || modeTime[m] > modeTime[best]) best = m;
+    tr.dominantMode = best || "stationary";
+    // Time actually spent moving, as opposed to elapsed.
+    tr.movingSec = 0;
+    for (m in modeTime) if (m !== "stationary" && m !== "event" && m !== "unobserved") tr.movingSec += modeTime[m];
+    return tr;
+  }
+
+  /* Events happen BETWEEN tracks, not inside them.
+
+     The linker refuses to join two centroids further apart than a player could
+     travel, so a teleport or a nether crossing does not appear as a fast leg --
+     it ends one track and starts another. Looking for events only inside tracks
+     therefore finds none by construction, which is exactly what the first
+     version did. So pair up consecutive tracks that could belong to the same
+     player and ask whether the jump between them needs explaining. */
+  function linkEvents(tracks, model, opts) {
+    opts = opts || {};
+    var bpt = model.blocksPerTile;
+    var maxGapMs = opts.eventGapMs === undefined ? 600000 : opts.eventGapMs;  // 10 min
+    var portals = opts.portals || null;
+    var out = [];
+
+    var byStart = tracks.slice().sort(function (a, b) { return a.startMs - b.startMs; });
+    for (var i = 0; i < byStart.length; i++) {
+      var a = byStart[i];
+      var best = null;
+      for (var j = i + 1; j < byStart.length; j++) {
+        var b = byStart[j];
+        if (b.startMs < a.lastMs) continue;
+        if (b.startMs - a.lastMs > maxGapMs) break;
+        // Same player, as far as the roster can say. If either end is
+        // unattributed, fall back to requiring that no one else was online.
+        if (a.player && b.player && a.player !== b.player) continue;
+        if (!best || b.startMs < best.startMs) best = b;
+      }
+      if (!best) continue;
+
+      var dt = (best.startMs - a.lastMs) / 1000;
+      var dist = Math.hypot(best.points[0].tx - a.lastTx, best.points[0].tz - a.lastTz) * bpt;
+      if (dt <= 0) continue;
+      var bps = dist / dt;
+      // A plausible walk across the gap needs no special explanation.
+      if (bps < 8 && dist < 512) continue;
+
+      var ev = {
+        ms: a.lastMs, endMs: best.startMs, gapSec: Math.round(dt),
+        fromTx: a.lastTx, fromTz: a.lastTz, toTx: best.points[0].tx, toTz: best.points[0].tz,
+        blocks: Math.round(dist), bps: bps,
+        fromTrack: a.id, toTrack: best.id,
+        player: a.player || best.player || null,
+        kind: bps >= 80 ? "teleport" : "dimension"
+      };
+      ev.netherBps = (dist / 8) / dt;
+      if (ev.netherBps >= 2 && ev.netherBps <= 40) {
+        ev.kind = "dimension";
+        ev.explains = "consistent with the nether at " + ev.netherBps.toFixed(1) +
+          " blocks/s (8:1, so about " + Math.round(dist / 8) + " blocks travelled there)";
+      } else if (bps >= 80) {
+        ev.explains = dist <= 50 ? "within ender-pearl range"
+                                 : "too fast for any overworld travel; a portal pair or a command";
+        if (dist <= 50) ev.kind = "pearl";
+      }
+      if (portals) {
+        var pFrom = nearestPortal(portals, a.lastTx * bpt, a.lastTz * bpt);
+        var pTo = nearestPortal(portals, ev.toTx * bpt, ev.toTz * bpt);
+        ev.portalFrom = pFrom; ev.portalTo = pTo;
+        /* Both ends near a public portal is the strongest confirmation available
+           without server logs: the player vanished by one and reappeared by
+           another, which is what using the highway looks like from outside. */
+        if (pFrom && pTo && pFrom.distBlocks < 256 && pTo.distBlocks < 256) {
+          ev.kind = "portal";
+          ev.explains = "left near \"" + pFrom.name + "\" and arrived near \"" + pTo.name +
+            "\" (" + Math.round(pFrom.distBlocks) + " and " + Math.round(pTo.distBlocks) + " blocks)";
+        } else if (pTo && pTo.distBlocks < 256) {
+          ev.explains = (ev.explains ? ev.explains + "; " : "") +
+            "arrives " + Math.round(pTo.distBlocks) + " blocks from the public portal \"" + pTo.name + "\"";
+        }
+      }
+      out.push(ev);
+    }
+    return out;
+  }
+
+  /* Nelt portals are published in NETHER coordinates; the overworld position is
+     eight times that. */
+  function nearestPortal(portals, wx, wz) {
+    var best = null;
+    for (var i = 0; i < portals.length; i++) {
+      var p = portals[i];
+      var ox = p.x * 8, oz = p.z * 8;
+      var d = Math.hypot(ox - wx, oz - wz);
+      if (!best || d < best.distBlocks) best = { name: p.name, x: ox, z: oz, distBlocks: d, entity: p.entity };
+    }
+    return best;
+  }
+
   /* How well does the track count match the number of people actually online?
      This is the honest scoreboard for the linking parameters above: if the two
      disagree badly, the gates are wrong and the tracks are fiction. */
@@ -380,8 +588,53 @@ window.DV = window.DV || {};
                    overCount: over / pts, underCount: under / pts } : null;
   }
 
+  /* Parse the Nelt tables (tab separated, nether coordinates). */
+
+  function splitLines(text) {
+    return String(text).split("\n").map(function (l) {
+      return l.charAt(l.length - 1) === "\r" ? l.slice(0, -1) : l;
+    }).filter(function (l) { return l.trim(); });
+  }
+
+  function parsePortals(tsv) {
+    var lines = splitLines(tsv);
+    if (!lines.length) return [];
+    var head = lines[0].split("	");
+    var iName = head.indexOf("Name"), iX = head.indexOf("X"), iZ = head.indexOf("Z");
+    var iEnt = head.indexOf("Political Entity"), iHide = head.indexOf("Hide");
+    var out = [];
+    for (var i = 1; i < lines.length; i++) {
+      var c = lines[i].split("	");
+      if (iHide >= 0 && c[iHide] === "1") continue;
+      var x = parseInt(c[iX], 10), z = parseInt(c[iZ], 10);
+      if (isNaN(x) || isNaN(z)) continue;
+      out.push({ name: c[iName] || "?", x: x, z: z, entity: iEnt >= 0 ? c[iEnt] : "" });
+    }
+    return out;
+  }
+
+  function parseHighways(tsv) {
+    var lines = splitLines(tsv);
+    if (!lines.length) return [];
+    var head = lines[0].split("	");
+    function idx(n) { return head.indexOf(n); }
+    var i1 = idx("X Position 1"), j1 = idx("Z Position 1"), i2 = idx("X Position 2"), j2 = idx("Z Position 2");
+    var iId = idx("ID"), iMain = idx("Main");
+    var out = [];
+    for (var i = 1; i < lines.length; i++) {
+      var c = lines[i].split("	");
+      var a = parseInt(c[i1], 10), b = parseInt(c[j1], 10), d = parseInt(c[i2], 10), e = parseInt(c[j2], 10);
+      if ([a, b, d, e].some(isNaN)) continue;
+      out.push({ x1: a, z1: b, x2: d, z2: e, id: c[iId] || "", main: c[iMain] === "1" });
+    }
+    return out;
+  }
+
   DV.infer = {
     worldToTile: worldToTile, heightBand: heightBand, inferHeights: inferHeights,
-    buildTracks: buildTracks, scoreTracks: scoreTracks
+    buildTracks: buildTracks, scoreTracks: scoreTracks,
+    annotateTrack: annotateTrack, classifySpeed: classifySpeed, MODES: MODES,
+    nearestPortal: nearestPortal, parsePortals: parsePortals, parseHighways: parseHighways,
+    linkEvents: linkEvents
   };
 })(window.DV);

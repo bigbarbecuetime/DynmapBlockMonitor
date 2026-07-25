@@ -65,7 +65,7 @@ window.DV = window.DV || {};
     var state = {
       model: null,
       t0: 0, t1: 0, cursor: 0,
-      mode: "hybrid",            // heat | images | hybrid
+      mode: "hybrid",            // heat | images | hybrid | tracks
       heatMetric: "count",       // count | recency | last
       heatScale: "sqrt",         // linear | sqrt | log
       halfLifeMs: 300000,
@@ -84,6 +84,8 @@ window.DV = window.DV || {};
       showMarkers: true,        // Dynmap's marker layer (world border, spawn, ...)
       tileKinds: "all",         // all | edits | loads  -- see the classification note in model.js
       showTracks: false,        // inferred player tracks (see infer.js)
+      showPortals: false,       // public nether portals + highway (the Nelt)
+      political: null,          // {date, tiles:Set} historical political map beneath
       // view: grid units (gx = tx, gy = -tz) at centre, plus px-per-tile
       gx: 0, gy: 0, scale: 6,
       hover: null, selected: null
@@ -98,6 +100,8 @@ window.DV = window.DV || {};
     var sessionStamp = Date.now();  // stable cache-buster; bumped only on demand
     var markers = null;             // Dynmap's marker layer, once fetched
     var tracks = null;              // inferred player tracks, if built
+    var trackEvents = null;         // teleports / nether crossings between them
+    var portals = null, highways = null;
     var suppressedImages = false;
     var needsDraw = false;
 
@@ -331,6 +335,8 @@ window.DV = window.DV || {};
       ctx.fillStyle = pal.bg;
       ctx.fillRect(0, 0, w, h);
 
+      drawPolitical();
+
       var vis = visibleRange();
       var cells = Math.max(0, (vis.tx1 - vis.tx0) * (vis.tz1 - vis.tz0));
       var wantImages = state.mode !== "heat" && state.imageSource !== "off";
@@ -425,6 +431,8 @@ window.DV = window.DV || {};
 
       /* --- inferred tracks, then server-published markers ---------------- */
       drawTracks();
+      drawTrackEvents();
+      drawPortals();
       drawMarkers();
 
       /* --- selection + hover ------------------------------------------- */
@@ -432,6 +440,73 @@ window.DV = window.DV || {};
       if (state.hover) outline(state.hover, pal.text1, 1);
 
       if (state.showRuler) drawRuler(vis);
+    }
+
+    /* ------------------------------------------------ political layer ---- */
+
+    /* Historical political maps from craftix (mccivmap). Their metadata reports
+       topLeft {-5504,-5504} at scale 1 -- ONE PIXEL PER BLOCK -- so a lod0 tile
+       of 512px covers exactly 512 blocks, i.e. 64 of our 8-block tiles. No
+       projection is needed, just a divide, which is why these line up with the
+       flat map exactly. Only meaningful under a flat projection: the political
+       map is drawn top-down, so it cannot be laid under a skewed view. */
+    function drawPolitical() {
+      var pol = state.political;
+      if (!pol || !pol.date || !isFlatProjection()) return;
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      var gridPerTile = 512 / bpt;                    // grid units covered by one lod0 tile
+      var a = toGrid(0, 0), b = toGrid(state.w, state.h);
+      var x0 = Math.floor(a.gx / gridPerTile), x1 = Math.ceil(b.gx / gridPerTile);
+      var z0 = Math.floor(a.gy / gridPerTile), z1 = Math.ceil(b.gy / gridPerTile);
+      if ((x1 - x0) * (z1 - z0) > 200) return;        // zoomed too far out to be worth it
+      ctx.globalAlpha = pol.opacity === undefined ? 0.55 : pol.opacity;
+      ctx.imageSmoothingEnabled = true;
+      for (var tx = x0; tx <= x1; tx++) {
+        for (var tz = z0; tz <= z1; tz++) {
+          var name = "lod0_x" + tx + "_z" + tz + ".png";
+          if (pol.tiles && !pol.tiles.has(name)) continue;
+          var e = getImage(pol.base + "/" + name);
+          if (!e.ok || !e.img) continue;
+          var p0 = toScreen(tx * gridPerTile, tz * gridPerTile);
+          var p1 = toScreen((tx + 1) * gridPerTile, (tz + 1) * gridPerTile);
+          ctx.drawImage(e.img, p0.x, p0.y, p1.x - p0.x + 1, p1.y - p0.y + 1);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    /* --------------------------------------------------- the Nelt layer --- */
+
+    /* Public nether portals and the highway, published in NETHER coordinates --
+       so the overworld position is eight times each value. */
+    function drawPortals() {
+      if (!state.showPortals) return;
+      var cs = getComputedStyle(canvas);
+      if (highways) {
+        ctx.strokeStyle = pal.critical;
+        ctx.globalAlpha = 0.35;
+        for (var i = 0; i < highways.length; i++) {
+          var h = highways[i];
+          ctx.lineWidth = h.main ? 2 : 1;
+          var p1 = worldToScreen(h.x1 * 8, h.z1 * 8, 64), p2 = worldToScreen(h.x2 * 8, h.z2 * 8, 64);
+          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+      if (portals && state.scale >= 0.6) {
+        for (i = 0; i < portals.length; i++) {
+          var q = worldToScreen(portals[i].x * 8, portals[i].z * 8, 64);
+          if (q.x < -20 || q.x > state.w + 20 || q.y < -20 || q.y > state.h + 20) continue;
+          ctx.fillStyle = pal.critical;
+          ctx.beginPath(); ctx.arc(q.x, q.y, 3, 0, 6.2832); ctx.fill();
+          if (state.scale >= 4) {
+            ctx.font = "9px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillStyle = pal.text2;
+            ctx.fillText(portals[i].name, q.x, q.y - 6);
+          }
+        }
+      }
     }
 
     /* ----------------------------------------------------- track layer ---- */
@@ -478,6 +553,39 @@ window.DV = window.DV || {};
           ctx.fillStyle = pal.text1;
           ctx.fillText(tr.player, last.x + last.s / 2, last.y + last.s / 2 - 8);
         }
+      }
+      ctx.restore();
+    }
+
+    /* A teleport or nether crossing is NOT a path, so it is drawn as a dashed
+       hop with both ends marked -- never as a line the player walked. */
+    function drawTrackEvents() {
+      if (!trackEvents || !state.showTracks) return;
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      for (var i = 0; i < trackEvents.length; i++) {
+        var e = trackEvents[i];
+        if (e.endMs < state.t0 || e.ms > state.cursor) continue;
+        var a = cellRect(Math.round(e.fromTx), Math.round(e.fromTz));
+        var b = cellRect(Math.round(e.toTx), Math.round(e.toTz));
+        /* Dash pattern carries confidence. A jump we can account for -- both ends
+           by a public portal, a nether pace that works out, or a distance inside
+           ender-pearl range -- gets an even dash: a real connection the player
+           made, just not on foot. One we cannot account for gets a sparse dot,
+           so it never reads as an explained route. */
+        var explained = !!e.explains;
+        ctx.setLineDash(explained ? [5, 4] : [1, 5]);
+        ctx.strokeStyle = e.kind === "portal" ? pal.warning : pal.critical;
+        ctx.lineWidth = explained ? 1.5 : 1;
+        ctx.globalAlpha = explained ? 0.85 : 0.5;
+        ctx.beginPath();
+        ctx.moveTo(a.x + a.s / 2, a.y + a.s / 2);
+        ctx.lineTo(b.x + b.s / 2, b.y + b.s / 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.beginPath(); ctx.arc(b.x + b.s / 2, b.y + b.s / 2, 3.5, 0, 6.2832); ctx.fill();
+        ctx.setLineDash([4, 4]);
       }
       ctx.restore();
     }
@@ -919,7 +1027,9 @@ window.DV = window.DV || {};
       setHistorical: function (set) { historical = set; images.clear(); invalidate(); },
       setMarkers: function (data) { markers = data; invalidate(); },
       setMapConfig: function (cfg) { state.mapCfg = cfg || null; invalidate(); },
-      setTracks: function (t) { tracks = t; invalidate(); },
+      setTracks: function (t, evs) { tracks = t; trackEvents = evs || null; invalidate(); },
+      setNelt: function (p, h) { portals = p; highways = h; invalidate(); },
+      setPolitical: function (cfg) { state.political = cfg; invalidate(); },
       markerSummary: function () {
         if (!markers || !markers.sets) return null;
         var areas = 0, points = 0, lines = 0, circles = 0, border = null;

@@ -41,6 +41,13 @@ RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 WORLD_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Outside data the viewer overlays, each pinned to one host and one shape of path.
+# Nothing here takes a caller-supplied host: these are proxied only because the
+# upstreams send no Access-Control-Allow-Origin, not to be a general fetcher.
+CRAFTIX = "https://craftix.cx"            # historical political maps, 1px = 1 block
+NELT = "https://nelt.chipthrasher.com"    # nether highway + public portals
 
 
 def _truthy(value):
@@ -77,6 +84,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self.api_images()
         if path == "/api/markers":
             return self.api_markers()
+        if path.startswith("/api/political/"):
+            return self.api_political(path[len("/api/political/"):])
+        if path.startswith("/api/nelt/"):
+            return self.api_nelt(path[len("/api/nelt/"):])
         if path == "/api/config":
             # Same CORS problem as the markers, same fixed-host mitigation. This
             # carries each map type's worldtomap matrix, which is what lets the
@@ -226,6 +237,51 @@ class Handler(SimpleHTTPRequestHandler):
         body = json.dumps({"error": message}).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---- outside map data -------------------------------------------------
+
+    def api_political(self, rest):
+        """Historical political maps from craftix (mccivmap).
+
+        metadata.json reports topLeft {-5504,-5504}, 11008x11008, scale 1 -- one
+        pixel per block -- so these overlay the tile grid directly with no
+        projection. Only the two small index files come through here; the PNG
+        tiles are loaded straight by the page, which needs no CORS for an <img>.
+        """
+        if rest == "dates":
+            return self.remote_json(CRAFTIX + "/elgeis/political/config.js", extract_dates=True)
+        parts = rest.split("/")
+        if len(parts) != 2 or not DATE_RE.match(parts[0]) or parts[1] not in ("metadata.json", "tile_list.txt"):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "expected /api/political/<YYYY-MM-DD>/<metadata.json|tile_list.txt>")
+        return self.remote_json("%s/mccivmap/elgeis/political/%s/%s" % (CRAFTIX, parts[0], parts[1]), raw=True)
+
+    def api_nelt(self, rest):
+        """The Nelt: the server's nether highway and its public portals.
+
+        Coordinates in these tables are NETHER coordinates, so overworld = x8.
+        """
+        if rest not in ("map", "lines", "colors"):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "expected /api/nelt/<map|lines|colors>")
+        return self.remote_json("%s/data/%s.tsv" % (NELT, rest), raw=True)
+
+    def remote_json(self, url, raw=False, extract_dates=False):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "phantom-viewer"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = r.read()
+        except Exception as e:
+            return self._json_error(HTTPStatus.BAD_GATEWAY, "could not reach %s: %s" % (url, e))
+        ctype = "application/json"
+        if extract_dates:
+            found = re.findall(rb"'/mccivmap/elgeis/political/(\d{4}-\d{2}-\d{2})'", body)
+            body = json.dumps(sorted(set(d.decode() for d in found))).encode("utf-8")
+        elif raw:
+            ctype = "text/plain; charset=utf-8"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

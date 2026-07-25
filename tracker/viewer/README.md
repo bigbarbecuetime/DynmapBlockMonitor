@@ -139,6 +139,27 @@ writes no row at all.
 
 ## Beyond plotting
 
+**Tracks** are their own map view, since they combine several sources. A leg is
+labelled by its measured speed, cut at the game's own numbers: `stationary`
+(<1 b/s), `walking` (<5, the game's walk is 4.3), `sprinting` (<8), `horse/boat`
+(<15), `fast` (<80, ice boat or elytra), and above that nothing on foot can
+explain it. A gap in loading is `unobserved` — we did not see how they got
+there — never a straight line drawn across the map.
+
+**Events** are the jumps between tracks, not legs inside them: the linker refuses
+to join two points further apart than a player could travel, so a teleport ends
+one track and starts the next. Each is checked against the nether's 8:1 (a 7,771
+block jump in 60s is 971 nether blocks at 16 b/s — an ice boat) and against the
+Nelt's public portals. Drawn **dashed** when accounted for, **dotted** when not,
+so an unexplained hop never reads as a route.
+
+**Layers.** Historical political maps come from craftix (339 snapshots,
+2018-09-08 to 2026-07-20), which publish at one pixel per block with
+`topLeft {-5504,-5504}` — the same frame as the world border — so they underlay
+the tile grid with no projection at all. The Nelt's 244 public portals and 61
+highway segments overlay on top; those tables are in **nether** coordinates, so
+overworld position is ×8.
+
 **Isometric map types** are drawn through their own projection, not flattened:
 the world grid and the markers go through that map's `worldtomap`, so the world
 border comes out as the rotated diamond Dynmap shows rather than a square, and
