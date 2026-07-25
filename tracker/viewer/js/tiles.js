@@ -79,6 +79,7 @@ window.DV = window.DV || {};
     var queue = [], inflight = 0;
     var historical = null;       // Set of available data/chunks filenames, or null
     var urlTemplate = null;      // for tiles that never appear in the CSV
+    var sessionStamp = Date.now();  // stable cache-buster; bumped only on demand
     var suppressedImages = false;
     var needsDraw = false;
 
@@ -124,41 +125,73 @@ window.DV = window.DV || {};
 
     /* ------------------------------------------------------------ heat calc */
 
-    function lowerBound(arr, ms) {
-      var lo = 0, hi = arr.length;
-      while (lo < hi) { var mid = (lo + hi) >> 1; if (arr[mid].tileMs < ms) lo = mid + 1; else hi = mid; }
-      return lo;
-    }
+    function lowerBound(arr, ms) { return M.lowerBound(arr, ms, "tileMs"); }
 
-    /* Recomputed whenever the window or cursor moves. Only tiles whose corrected
-       render time falls in [windowStart, cursor] contribute, so scrubbing the
-       cursor genuinely rewinds the map instead of just dimming it. */
+    /* Accumulation state, so playback does not re-walk the whole tile list every
+       frame. Heat only ever GROWS as the cursor advances with a fixed window
+       start, so a forward step just folds in the tiles between the old cursor and
+       the new one; anything else (window start moved, cursor jumped backwards,
+       new model, metric changed) falls back to a full rebuild. */
+    var acc = { t0: NaN, cursor: NaN, metric: null, halfLifeMs: NaN, model: null, idx: 0 };
+
+    /* Only tiles whose corrected render time falls in [windowStart, cursor]
+       contribute, so scrubbing the cursor genuinely rewinds the map instead of
+       just dimming it. */
     function recomputeHeat() {
-      heat.clear(); heatMax = 0; heatCount = 0;
       var m = state.model;
-      if (!m || !m.tiles.length) return;
       var from = state.t0, to = state.cursor;
-      var i = lowerBound(m.tiles, from);
       var tau = state.halfLifeMs / Math.LN2;
-      for (; i < m.tiles.length; i++) {
-        var t = m.tiles[i];
+
+      var full = !m || m !== acc.model || from !== acc.t0 ||
+                 state.heatMetric !== acc.metric || state.halfLifeMs !== acc.halfLifeMs ||
+                 !(to >= acc.cursor);
+      if (full) {
+        heat.clear();
+        acc.model = m; acc.t0 = from; acc.metric = state.heatMetric;
+        acc.halfLifeMs = state.halfLifeMs;
+        acc.idx = m && m.tiles.length ? lowerBound(m.tiles, from) : 0;
+      }
+      acc.cursor = to;
+
+      heatMax = 0; heatCount = 0;
+      if (!m || !m.tiles.length) return;
+
+      var tiles = m.tiles, i = acc.idx;
+      for (; i < tiles.length; i++) {
+        var t = tiles[i];
         if (t.tileMs > to) break;
         var k = t.tx + "," + t.tz;
         var c = heat.get(k);
-        if (!c) { c = { v: 0, n: 0, lastMs: -Infinity, firstMs: t.tileMs, tx: t.tx, tz: t.tz, last: null }; heat.set(k, c); }
+        if (!c) {
+          c = { v: 0, n: 0, lastMs: -Infinity, firstMs: t.tileMs, tx: t.tx, tz: t.tz, last: null,
+                accum: 0, accumAt: t.tileMs };
+          heat.set(k, c);
+        }
         c.n++;
         c.lastMs = t.tileMs;
         c.last = t;
-        if (state.heatMetric === "recency") c.v += Math.exp(-(to - t.tileMs) / tau);
-        else c.v = c.n;
-      }
-      heat.forEach(function (c) {
-        if (state.heatMetric === "last") {
-          // Newest change = hottest. Age is inverted against the window length so
-          // the ramp still runs low->high like every other metric.
-          var span = Math.max(1, to - from);
-          c.v = Math.max(0, 1 - (to - c.lastMs) / span);
+        if (state.heatMetric === "recency") {
+          /* Decay-then-add, carrying its own reference time. This is what makes
+             recency incremental: the value at any later moment is
+             accum * exp(-(now - accumAt)/tau), so we never have to revisit older
+             tiles. Rescaling relative to the cell's own last change also keeps
+             the exponent small -- factoring out a shared epoch instead would
+             overflow, since a 21h span over a 5min half-life is exp(174). */
+          c.accum = c.accum * Math.exp(-(t.tileMs - c.accumAt) / tau) + 1;
+          c.accumAt = t.tileMs;
         }
+      }
+      acc.idx = i;
+
+      /* Finalise over CELLS (a couple of thousand) rather than tiles (tens of
+         thousands). Both recency and "last" depend on the cursor for every cell,
+         so this pass cannot be skipped -- but it is an order of magnitude smaller
+         than the old full-tile walk. */
+      var metric = state.heatMetric, span = Math.max(1, to - from);
+      heat.forEach(function (c) {
+        if (metric === "count") c.v = c.n;
+        else if (metric === "recency") c.v = c.accum * Math.exp(-(to - c.accumAt) / tau);
+        else c.v = Math.max(0, 1 - (to - c.lastMs) / span);  // newest = hottest
         if (c.v > heatMax) heatMax = c.v;
         heatCount++;
       });
@@ -239,9 +272,18 @@ window.DV = window.DV || {};
         img.src = job.url;
       }
       if (images.size > CACHE_LIMIT) {
-        // Cheap eviction: drop the oldest inserted entries (Map keeps order).
-        var drop = images.size - CACHE_LIMIT, it = images.keys();
-        for (var i = 0; i < drop; i++) { var k = it.next().value; if (k) images.delete(k); }
+        /* Drop the oldest inserted entries (Map preserves insertion order), but
+           never one that is still in flight: evicting a loading entry orphans its
+           download -- the handler completes into an object nothing references, and
+           the next draw re-queues the identical URL. */
+        var drop = images.size - CACHE_LIMIT;
+        var keys = images.keys(), k;
+        while (drop > 0 && (k = keys.next().value) !== undefined) {
+          var e = images.get(k);
+          if (e && e.loading) continue;
+          images.delete(k);
+          drop--;
+        }
       }
     }
 
@@ -554,11 +596,19 @@ window.DV = window.DV || {};
 
     /* Hottest cells in the current window -- feeds the "top tiles" table, which
        is also the non-colour route to the same ranking the heatmap encodes. */
+    /* Bounded selection, not a full sort: this runs on the throttled render path
+       several times a second, and sorting every lit cell to show the top dozen is
+       most of the work thrown away. Keeps an ordered array of at most n. */
     function topCells(n) {
-      var arr = [];
-      heat.forEach(function (c) { arr.push(c); });
-      arr.sort(function (a, b) { return b.v - a.v || b.n - a.n; });
-      return arr.slice(0, n || 10).map(function (c) {
+      var want = n || 10, best = [];
+      heat.forEach(function (c) {
+        if (best.length === want && c.v <= best[best.length - 1].v) return;
+        var lo = 0, hi = best.length;
+        while (lo < hi) { var mid = (lo + hi) >> 1; if (best[mid].v > c.v) lo = mid + 1; else hi = mid; }
+        best.splice(lo, 0, c);
+        if (best.length > want) best.pop();
+      });
+      return best.map(function (c) {
         var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
         return { tx: c.tx, tz: c.tz, n: c.n, v: c.v, bin: heatBin(c.v),
                  lastMs: c.lastMs, world: M.tileWorld(c.tx, c.tz, bpt) };
@@ -572,11 +622,18 @@ window.DV = window.DV || {};
         urlTemplate = null;
         if (m && m.tiles.length) {
           var t = m.tiles[0];
-          // Rebuild the tile URL pattern from a row we already have, so context
-          // fills work without the viewer having to be told the server address.
+          /* Rebuild the tile URL pattern from a row we already have, so context
+             fills work without the viewer having to be told the server address.
+
+             The cache-buster is fixed for the life of the page, NOT per rebuild.
+             Keying it off the model stamp minted fresh URLs for every unchanged
+             context tile on every live poll -- up to ~700 refetches every few
+             seconds, which also thrashed the image cache so nothing was ever
+             reused. These are "current render" tiles; their staleness has nothing
+             to do with how often the CSV grows. Use "Reload now" to refetch. */
           urlTemplate = function (tx, tz) {
             return t.origin + "/tiles/" + t.world + "/" + t.map + "/" +
-                   (tx >> 5) + "_" + (tz >> 5) + "/" + tx + "_" + tz + ".png?ts=" + (m.stamp || 0);
+                   (tx >> 5) + "_" + (tz >> 5) + "/" + tx + "_" + tz + ".png?v=" + sessionStamp;
           };
         }
         recomputeHeat(); invalidate();
@@ -598,7 +655,11 @@ window.DV = window.DV || {};
       get: function (k) { return state[k]; },
       setHistorical: function (set) { historical = set; images.clear(); invalidate(); },
       refreshPalette: function () { pal = readPalette(canvas); invalidate(); },
-      clearImageCache: function () { images.clear(); queue.length = 0; invalidate(); },
+      clearImageCache: function () {
+        images.clear(); queue.length = 0;
+        sessionStamp = Date.now();   // an explicit reload should really refetch
+        invalidate();
+      },
       redraw: invalidate, flush: flush,
       resize: function () { resize(); invalidate(); },
       fit: fit, centerOn: centerOn, view: view,

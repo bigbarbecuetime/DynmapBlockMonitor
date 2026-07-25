@@ -109,10 +109,10 @@ window.DV = window.DV || {};
   }
 
   function tilesInWindow(model, cursorMs, spanMs) {
-    var tiles = model.tiles, lo = 0, hi = tiles.length, from = cursorMs - spanMs;
-    while (lo < hi) { var mid = (lo + hi) >> 1; if (tiles[mid].tileMs < from) lo = mid + 1; else hi = mid; }
+    var tiles = model.tiles;
+    var i = M.lowerBound(tiles, cursorMs - spanMs, "tileMs");
     var n = 0;
-    for (var i = lo; i < tiles.length; i++) { if (tiles[i].tileMs > cursorMs) break; n++; }
+    for (; i < tiles.length; i++) { if (tiles[i].tileMs > cursorMs) break; n++; }
     return n;
   }
 
@@ -250,7 +250,11 @@ window.DV = window.DV || {};
     if (!model) { root.innerHTML = '<div class="empty">No data loaded.</div>'; return; }
     var span = windowMs || 60000;
     var from = cursorMs - span, to = cursorMs;
-    var tiles = model.tiles.filter(function (t) { return t.tileMs >= from && t.tileMs <= to; });
+    /* Binary-searched slice, not a full filter. This runs on every throttled
+       cursor tick, and scanning every tile to return the handful inside a 60s
+       window was ~64k predicate calls a second on a day of data -- and it grows
+       with the file forever while the answer stays a few elements. */
+    var tiles = M.sliceRange(model.tiles, from, to, "tileMs");
     var snap = DV.snapshotAt(model, cursorMs);
 
     root.appendChild(el('<div class="stats">' +

@@ -1,0 +1,8 @@
+# The build context is this folder, so the repo-root .dockerignore does not apply.
+# Keep the logs out: data/ is already ~1 MB after a day and would be copied into
+# the build context on every build for no reason (the container mounts it instead).
+data
+__pycache__
+*.pyc
+# Never bake real server addresses or ports into an image.
+.env

@@ -98,9 +98,17 @@ window.DV = window.DV || {};
     /* ------------------------------------------------------------ bucketing */
 
     var buckets = null, bucketW = 3, bucketMs = 1, playerMax = 1;
+    /* The histogram depends only on (model, view span, width) -- never on the
+       cursor. During playback the cursor moves every frame while none of those
+       change, so without this guard every frame re-walked the whole tile list. */
+    var bucketKey = null;
+    var spark = { key: null, acc: null, max: 0, n: 0 };   // overview sparkline cache
 
     function rebucket() {
       var m = st.model;
+      var key = m ? (m.stamp + "|" + st.viewA + "|" + st.viewB + "|" + st.w) : null;
+      if (key !== null && key === bucketKey && buckets) return;
+      bucketKey = key;
       buckets = null;
       if (!m) return;
       var n = Math.max(1, Math.floor(st.w / bucketW));
@@ -128,11 +136,7 @@ window.DV = window.DV || {};
       }
     }
 
-    function lowerBoundTiles(arr, ms) {
-      var lo = 0, hi = arr.length;
-      while (lo < hi) { var mid = (lo + hi) >> 1; if (arr[mid].tileMs < ms) lo = mid + 1; else hi = mid; }
-      return lo;
-    }
+    function lowerBoundTiles(arr, ms) { return M.lowerBound(arr, ms, "tileMs"); }
 
     /* -------------------------------------------------------------- drawing */
 
@@ -170,22 +174,29 @@ window.DV = window.DV || {};
 
       hatchGaps(band, xOfOv, m.bounds.minMs, m.bounds.maxMs);
 
-      // A coarse activity sparkline so the overview shows where the data is.
-      var n = Math.max(1, Math.floor(st.w / 2));
-      var span = Math.max(1, m.bounds.maxMs - m.bounds.minMs);
-      var acc = new Float64Array(n), max = 0;
-      for (var i = 0; i < m.tiles.length; i++) {
-        var k = Math.floor((m.tiles[i].tileMs - m.bounds.minMs) / span * n);
-        if (k >= 0 && k < n) acc[k]++;
+      /* A coarse activity sparkline so the overview shows where the data is.
+         Cached on (model, width): it covers the whole file and is therefore
+         identical on every frame, so recomputing it during playback was ~9,200
+         iterations a frame producing a pixel-identical 16px strip. */
+      var sparkKey = m.stamp + "|" + st.w;
+      if (sparkKey !== spark.key) {
+        var n = Math.max(1, Math.floor(st.w / 2));
+        var span = Math.max(1, m.bounds.maxMs - m.bounds.minMs);
+        var a = new Float64Array(n), max = 0;
+        for (var i = 0; i < m.tiles.length; i++) {
+          var k = Math.floor((m.tiles[i].tileMs - m.bounds.minMs) / span * n);
+          if (k >= 0 && k < n) a[k]++;
+        }
+        for (i = 0; i < n; i++) if (a[i] > max) max = a[i];
+        spark = { key: sparkKey, acc: a, max: max, n: n };
       }
-      for (i = 0; i < n; i++) if (acc[i] > max) max = acc[i];
-      if (max > 0) {
+      if (spark.max > 0) {
         ctx.fillStyle = pal.tiles;
         ctx.globalAlpha = 0.55;
-        for (i = 0; i < n; i++) {
-          if (!acc[i]) continue;
-          var hh = Math.max(1, acc[i] / max * (band.h - 2));
-          ctx.fillRect(i * 2, band.y + band.h - hh - 1, 2, hh);
+        for (var j = 0; j < spark.n; j++) {
+          if (!spark.acc[j]) continue;
+          var hh = Math.max(1, spark.acc[j] / spark.max * (band.h - 2));
+          ctx.fillRect(j * 2, band.y + band.h - hh - 1, 2, hh);
         }
         ctx.globalAlpha = 1;
       }
@@ -590,14 +601,7 @@ window.DV = window.DV || {};
   /* The snapshot in force at a moment. players.csv holds its value until the
      next row, so "the value at t" is the last row at or before t -- never an
      interpolation between neighbours. */
-  function snapshotAt(m, ms) {
-    var lo = 0, hi = m.snapshots.length - 1, best = null;
-    while (lo <= hi) {
-      var mid = (lo + hi) >> 1;
-      if (m.snapshots[mid].ms <= ms) { best = m.snapshots[mid]; lo = mid + 1; } else hi = mid - 1;
-    }
-    return best;
-  }
+  function snapshotAt(m, ms) { return M.atOrBefore(m.snapshots, ms); }
 
   /* ==========================================================================
      Transport: the playback clock.

@@ -114,7 +114,20 @@ docker compose up --build
 ### Viewing the data
 
 The CSVs open in Excel/Sheets, but [`tracker/viewer/`](tracker/viewer/README.md) is a
-dependency-free static page that plots them properly:
+dependency-free static page that plots them properly. `docker compose up -d` serves it
+alongside the tracker at <http://127.0.0.1:8080/viewer/> — same image, no extra build.
+
+To run the tracker without it, set `HEADLESS=true` (in `.env`, or for one run):
+
+```bash
+HEADLESS=true docker compose up -d
+```
+
+The viewer container then exits cleanly and stays stopped; the tracker is unaffected.
+It binds to loopback only, because it has no authentication and the CSVs contain player
+names — set `VIEWER_BIND=0.0.0.0` (and `VIEWER_PORT`) to reach it from your LAN.
+
+Without Docker, run it directly from the `tracker` folder:
 
 ```bash
 python viewer/serve.py

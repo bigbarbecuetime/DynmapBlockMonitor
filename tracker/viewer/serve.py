@@ -32,8 +32,14 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent      # the tracker/ folder
+# The folder served as "/". Defaults to tracker/, so the page is at /viewer/ and
+# the CSVs at /data/. main() can point it elsewhere with --root.
+ROOT = Path(__file__).resolve().parent.parent
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _truthy(value):
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -164,12 +170,30 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main():
+    global ROOT
+
     ap = argparse.ArgumentParser(description="Serve the tracker folder for the viewer.")
     ap.add_argument("-p", "--port", type=int, default=int(os.environ.get("VIEWER_PORT", "8080")))
     ap.add_argument("--host", default=os.environ.get("VIEWER_HOST", "127.0.0.1"),
                     help="bind address (default 127.0.0.1; use 0.0.0.0 to expose on your LAN)")
+    ap.add_argument("--root", default=os.environ.get("VIEWER_ROOT", ""),
+                    help="folder to serve as '/' (default: the tracker folder next to this script)")
     ap.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    ap.add_argument("--headless", action="store_true",
+                    help="do not serve anything and exit 0; also set by HEADLESS=true")
     args = ap.parse_args()
+
+    # Headless: exit cleanly WITHOUT binding a port. This is how docker-compose
+    # turns the viewer off -- the container starts, sees the flag, exits 0, and its
+    # on-failure restart policy leaves it stopped. Exiting 0 (not 1) is the point:
+    # a non-zero exit would be restarted forever.
+    if args.headless or _truthy(os.environ.get("HEADLESS", "")):
+        print("[serve] headless: not serving the viewer (set HEADLESS=false to enable it). "
+              "The tracker is unaffected.")
+        return
+
+    if args.root:
+        ROOT = Path(args.root).resolve()
 
     handler = partial(Handler, directory=str(ROOT))
     server = ThreadingHTTPServer((args.host, args.port), handler)

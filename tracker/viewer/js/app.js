@@ -25,6 +25,7 @@
     corrWindowMs: 60000,
     dataBase: "../data",
     mapType: null,           // null = let the model pick the most-logged type
+    parseCache: {},          // memoised row parse, reused across rebuilds
     live: false, livePollMs: 5000, liveTimer: 0,
     tailChunks: null, tailPlayers: null,
     historical: null,
@@ -82,7 +83,12 @@
     state.model = M.build(state.chunkRows, state.playerRows, {
       skewMs: state.skewOverride,
       blocksPerTile: state.blocksPerTile,
-      mapType: state.mapType
+      mapType: state.mapType,
+      /* Reused across rebuilds so a live poll only parses the rows that arrived,
+         instead of re-running a regex and a URL split over every row in the file.
+         Safe because the row arrays are appended to in place -- see the PARSE
+         CACHE note in model.js. */
+      cache: state.parseCache
     });
     state.model.stamp = Date.now();
 
@@ -344,37 +350,70 @@
     scheduleSlow();
   }
 
-  /* DOM panels: throttled. */
+  /* DOM panels: throttled.
+     Split by what each panel actually depends on. Rebuilding all eight several
+     times a second during playback meant creating and discarding ~4,000 elements
+     and the same number of click closures per second -- and three of them cannot
+     change unless the model does. */
+  var lastModelRendered = null, lastWindowRendered = "";
+
   function renderSlow() {
     var m = state.model;
     if (!m) return;
     var w = transport.window(), c = transport.cursor;
 
+    // --- model-only: lifecycle events and the quality report
+    if (m !== lastModelRendered) {
+      lastModelRendered = m;
+      P.renderQuality($("qualityPanel"), m);
+      $("qualityCount").textContent = m.quality.length ? m.quality.length + " notes" : "";
+      P.renderEvents($("eventFeed"), m, seek);
+    }
+
+    // --- window-only: the sample table is a list of rows in the window
+    var wkey = m.stamp + "|" + w.t0 + "|" + w.t1;
+    if (wkey !== lastWindowRendered) {
+      lastWindowRendered = wkey;
+      P.renderSnapshotTable($("snapTable"), m, w.t0, w.t1, c, seek);
+      var n = P.renderTransitions($("transFeed"), m, w.t0, w.t1, c, seek);
+      $("transCount").textContent = n ? n + " in window" : "";
+    }
+
+    // --- cursor-dependent
     P.renderNow($("nowPanel"), m, c);
-    var n = P.renderTransitions($("transFeed"), m, w.t0, w.t1, c, seek);
-    $("transCount").textContent = n ? n + " in window" : "";
     P.renderCorrelation($("corrPanel"), m, c, state.corrWindowMs);
     P.renderTopTiles($("topTiles"), map.topCells(14), m, function (r) {
       map.centerOn(r.tx, r.tz, Math.max(map.view().scale, 14));
       selectTile(map.describe(r.tx, r.tz));
     });
-    P.renderQuality($("qualityPanel"), m);
-    $("qualityCount").textContent = m.quality.length ? m.quality.length + " notes" : "";
-    P.renderEvents($("eventFeed"), m, seek);
     if (selected) P.renderTileDetail($("tilePanel"), map.describe(selected.tx, selected.tz), m, c, seek);
-    P.renderSnapshotTable($("snapTable"), m, w.t0, w.t1, c, seek);
 
     renderHeatLegend();
     syncRangeInputs();
   }
+
+  /* Force the panels that are otherwise change-gated to redraw (theme switch,
+     tab switch, anything that replaces their DOM out from under us). */
+  function invalidatePanels() { lastModelRendered = null; lastWindowRendered = ""; }
 
   function renderHeatLegend() {
     var lg = map.heatLegend();
     var root = $("heatLegend");
     root.innerHTML = "";
     if (!lg.max) {
-      root.innerHTML = '<span style="color:var(--text-3)">No tile changes in this window.</span>';
-      $("heatLegendNote").textContent = "";
+      /* Two very different reasons the ramp has no range, and saying "no changes"
+         for the second one is a lie: with a short half-life and the cursor well
+         after the last change, every cell has simply decayed to zero. */
+      if (lg.cells && lg.metric === "recency") {
+        root.innerHTML = '<span style="color:var(--text-3)">All decayed to zero.</span>';
+        $("heatLegendNote").textContent =
+          lg.cells.toLocaleString() + " tiles changed in this window, but the newest is far enough " +
+          "before the cursor that a " + M.fmtDur(map.get("halfLifeMs")) +
+          " half-life leaves nothing to show. Raise the half-life, or move the cursor to where the activity is.";
+      } else {
+        root.innerHTML = '<span style="color:var(--text-3)">No tile changes in this window.</span>';
+        $("heatLegendNote").textContent = "";
+      }
       return;
     }
     var ramp = document.createElement("div");
@@ -625,6 +664,7 @@
       map.resize();
       map.flush();
       timeline.flush();
+      invalidatePanels();
       renderFast();
       renderSlow();
     });
@@ -957,7 +997,8 @@
       $("panelRight").dataset.active = v === "right" ? "true" : "false";
       $("panelSide").dataset.active = v === "side" ? "true" : "false";
       if (v === "map") { map.resize(); }
-      if (v === "right") renderSlow();
+      // The panel was display:none, so the change-gated ones must be rebuilt.
+      if (v === "right") { invalidatePanels(); renderSlow(); }
     });
   }
 

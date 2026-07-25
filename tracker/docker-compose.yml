@@ -11,3 +11,38 @@ services:
     env_file: .env          # copy .env.example to .env and fill it in
     volumes:
       - ./data:/data        # logs land in ./data on the host
+
+  # Serves the CSV viewer at http://127.0.0.1:8080/viewer/ out of the same image.
+  #
+  # The page is COPYied into the image, so editing viewer/ needs a rebuild:
+  #     docker compose up -d --build viewer
+  # `restart` alone re-runs the old copy. To iterate without rebuilding, add
+  #     - ./viewer:/app/viewer:ro
+  # to the volumes below and a plain reload picks up every change.
+  #
+  # Turn it off with HEADLESS=true -- either in .env or for one run:
+  #     HEADLESS=true docker compose up -d
+  # serve.py then exits 0 without binding a port, and because this service restarts
+  # `on-failure` (not the tracker's `unless-stopped`) a clean exit leaves it stopped
+  # rather than looping. The tracker keeps running either way.
+  viewer:
+    image: ghcr.io/bigbarbecuetime/dynmap-tracker:latest
+    build: .
+    container_name: dynmap-tracker-viewer
+    restart: on-failure
+    command: ["python", "viewer/serve.py", "--host", "0.0.0.0", "--port", "8080", "--no-browser"]
+    environment:
+      # Only this one is relevant: a static file server has no use for the Dynmap
+      # or Minecraft settings, so .env is deliberately not loaded here.
+      HEADLESS: ${HEADLESS:-false}
+    ports:
+      # Loopback by default -- the viewer has no authentication and the CSVs carry
+      # player names. Set VIEWER_BIND=0.0.0.0 to reach it from your LAN.
+      - "${VIEWER_BIND:-127.0.0.1}:${VIEWER_PORT:-8080}:8080"
+    volumes:
+      # Read-only: the viewer only reads what the tracker writes. Mounted at
+      # /app/data because serve.py serves its own parent folder as "/", which puts
+      # the page at /viewer/ and the CSVs at /data/.
+      - ./data:/app/data:ro
+    depends_on:
+      - tracker

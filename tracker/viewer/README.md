@@ -11,6 +11,18 @@ python viewer/serve.py
 Opens <http://127.0.0.1:8080/viewer/>. You can also open `index.html` straight
 from disk and drag the two CSVs onto the page, but live follow needs HTTP.
 
+### With Docker
+
+`docker compose up -d` from the `tracker` folder runs the viewer next to the
+tracker out of the same image, at <http://127.0.0.1:8080/viewer/>. The data
+directory is mounted read-only — the viewer never writes.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `HEADLESS` | `false` | `true` runs the tracker only; `serve.py` exits 0 without binding a port and, because the service restarts `on-failure`, stays stopped |
+| `VIEWER_PORT` | `8080` | Host port |
+| `VIEWER_BIND` | `127.0.0.1` | Loopback by default: there is no authentication and the CSVs contain player names. `0.0.0.0` exposes it to your LAN |
+
 ---
 
 ## What it shows

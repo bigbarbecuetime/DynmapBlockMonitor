@@ -104,6 +104,37 @@ window.DV = window.DV || {};
 
   function median(sorted) { return pct(sorted, 0.5); }
 
+  /* Index of the first element whose `key` is >= ms, in an array already sorted by
+     that key. The one copy of this: every hot path in the viewer walks a
+     time-sorted array (tiles by tileMs, steps/snapshots by ms), and it was
+     previously re-implemented four times with two different edge conventions. */
+  function lowerBound(arr, ms, key) {
+    var k = key || "ms", lo = 0, hi = arr.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (arr[mid][k] < ms) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+
+  /* The last element at or before ms, or null. */
+  function atOrBefore(arr, ms, key) {
+    var i = lowerBound(arr, ms, key);
+    var k = key || "ms";
+    // lowerBound lands on the first >= ms; an exact hit is still "at or before".
+    if (i < arr.length && arr[i][k] === ms) return arr[i];
+    return i > 0 ? arr[i - 1] : null;
+  }
+
+  /* Elements whose `key` falls in [from, to], as a slice of a sorted array. */
+  function sliceRange(arr, from, to, key) {
+    var k = key || "ms";
+    var i = lowerBound(arr, from, k);
+    var j = i;
+    while (j < arr.length && arr[j][k] <= to) j++;
+    return arr.slice(i, j);
+  }
+
   /* ".../tiles/8302018/flat2/8_18/256_600.png" -> the parts we need. Returns
      null for anything that isn't a native two-coordinate tile name. */
   function parseTileUrl(url) {
@@ -140,15 +171,56 @@ window.DV = window.DV || {};
 
   /* ======================================================================= */
 
-  /* opts: {skewMs|null (null = estimate), blocksPerTile, retentionMs, mapType} */
+  /* ==========================================================================
+     PARSE CACHE
+     --------------------------------------------------------------------------
+     Live mode re-derives the model on every poll, but the raw rows never change
+     once written -- only new ones are appended. Re-running parseMs (a regex) and
+     parseTileUrl (splits) over every row each time is the single most expensive
+     thing the viewer does: ~9,200 rows today, ~65,000 after a week.
+
+     So the parse is memoised. The caller hands the same cache object back on each
+     rebuild; we reuse it as long as the row arrays are the SAME arrays and have
+     only grown, and parse just the tail. This is why app.js appends rows in place
+     rather than with concat(): a fresh array would break identity and force a
+     full re-parse every poll.
+
+     Only skew-independent facts are cached (capMs, rawTileMs, coordinates), so
+     changing the clock offset, map type or blocks-per-tile re-derives without
+     re-parsing.
+     ======================================================================== */
+  function freshCache(chunkRows, playerRows) {
+    return {
+      chunkSrc: chunkRows, playerSrc: playerRows,
+      chunkSeen: 0, playerSeen: 0,
+      allTiles: [], chunkErrors: [], lifecycle: [], playerErrors: [],
+      snapByTime: new Map(), snapshots: [], mapCounts: new Map()
+    };
+  }
+
+  function usable(cache, chunkRows, playerRows) {
+    return cache && cache.chunkSrc === chunkRows && cache.playerSrc === playerRows &&
+           cache.chunkSeen <= chunkRows.length && cache.playerSeen <= playerRows.length;
+  }
+
+  /* opts: {skewMs|null (null = estimate), blocksPerTile, retentionMs, mapType, cache} */
   function build(chunkRows, playerRows, opts) {
     opts = opts || {};
     var bpt = opts.blocksPerTile || BLOCKS_PER_TILE;
     var retention = opts.retentionMs || RETENTION_MS;
 
-    /* ---- pass 1: split raw chunk rows by kind -------------------------- */
-    var allTiles = [], chunkErrors = [], lifecycle = [], mapCounts = new Map();
-    for (var i = 0; i < chunkRows.length; i++) {
+    /* ---- pass 1: parse whatever is new ------------------------------- */
+    var C = usable(opts.cache, chunkRows, playerRows) ? opts.cache : freshCache(chunkRows, playerRows);
+    if (opts.cache && opts.cache !== C) {
+      // Caller's cache was stale (different arrays, or rows removed): replace its
+      // contents in place so the caller keeps holding a valid object.
+      for (var kk in C) opts.cache[kk] = C[kk];
+      C = opts.cache;
+    }
+
+    var allTiles = C.allTiles, chunkErrors = C.chunkErrors, lifecycle = C.lifecycle,
+        mapCounts = C.mapCounts;
+    for (var i = C.chunkSeen; i < chunkRows.length; i++) {
       var r = chunkRows[i];
       var capMs = parseMs(r.time);
       if (r.event) { lifecycle.push({ ms: capMs, raw: r.event, source: "chunks" }); continue; }
@@ -164,6 +236,7 @@ window.DV = window.DV || {};
         world: info.world, origin: info.origin, name: info.name
       });
     }
+    C.chunkSeen = chunkRows.length;
 
     /* ---- one map type at a time --------------------------------------- */
     /* tracker.py can be run with MAP_TYPE="" to log EVERY map type. Different
@@ -245,18 +318,24 @@ window.DV = window.DV || {};
 
     /* ---- pass 2: player rows ------------------------------------------ */
     /* Rows sharing one "time" are ONE snapshot (tracker.py writes one row per
-       online name). Rebuild the roster before drawing any conclusion from it. */
-    var playerErrors = [], byTime = new Map(), order = [];
-    for (i = 0; i < playerRows.length; i++) {
+       online name). Rebuild the roster before drawing any conclusion from it.
+       A poll can land mid-snapshot and split those rows across two builds, which
+       the by-time Map handles: the later rows find the existing snapshot and add
+       to its roster, and the flags below are recomputed each build so a
+       momentarily-incomplete roster corrects itself. */
+    var playerErrors = C.playerErrors, byTime = C.snapByTime;
+    for (i = C.playerSeen; i < playerRows.length; i++) {
       var p = playerRows[i], pms = parseMs(p.time);
       if (p.event) { lifecycle.push({ ms: pms, raw: p.event, source: "players" }); continue; }
       if (p.error) { playerErrors.push({ ms: pms, reason: p.error }); continue; }
       if (p.count === "" || p.count === undefined) continue;
       var snap = byTime.get(pms);
-      if (!snap) { snap = { ms: pms, count: parseInt(p.count, 10) || 0, roster: [] }; byTime.set(pms, snap); order.push(snap); }
+      if (!snap) { snap = { ms: pms, count: parseInt(p.count, 10) || 0, roster: [] }; byTime.set(pms, snap); C.snapshots.push(snap); }
       if (p.player) snap.roster.push(p.player);
     }
-    var snapshots = order.sort(function (a, b) { return a.ms - b.ms; });
+    C.playerSeen = playerRows.length;
+
+    var snapshots = C.snapshots.sort(function (a, b) { return a.ms - b.ms; });
     for (i = 0; i < snapshots.length; i++) {
       var s = snapshots[i];
       s.roster.sort();
@@ -293,8 +372,18 @@ window.DV = window.DV || {};
     dataMs.sort(function (a, b) { return a - b; });
 
     var bounds = { minMs: NaN, maxMs: NaN };
-    var allMs = dataMs.concat(events.map(function (e) { return e.ms; })).filter(isFinite).sort(function (a, b) { return a - b; });
-    if (allMs.length) { bounds.minMs = allMs[0]; bounds.maxMs = allMs[allMs.length - 1]; }
+    /* min/max directly, rather than concatenating and sorting a second copy of
+       every timestamp in the file just to read its two ends. dataMs is already
+       ascending. */
+    var lo = Infinity, hi = -Infinity;
+    if (dataMs.length) { lo = dataMs[0]; hi = dataMs[dataMs.length - 1]; }
+    for (i = 0; i < events.length; i++) {
+      var ems = events[i].ms;
+      if (!isFinite(ems)) continue;
+      if (ems < lo) lo = ems;
+      if (ems > hi) hi = ems;
+    }
+    if (isFinite(lo)) { bounds.minMs = lo; bounds.maxMs = hi; }
     // Corrected tile times can sit slightly outside the capture range.
     if (tiles.length) {
       bounds.minMs = Math.min(bounds.minMs, tiles[0].tileMs);
@@ -302,10 +391,13 @@ window.DV = window.DV || {};
     }
 
     var coverage = [], open = null;
+    /* Binary search, not a scan: this is called once per lifecycle event, and a
+       long-lived file with many tracker restarts would otherwise be O(restarts x
+       rows) on every rebuild -- 100 restarts over 65k rows is 6.5M steps a poll. */
     function lastDataBefore(ms) {
-      var best = NaN;
-      for (var j = 0; j < dataMs.length; j++) { if (dataMs[j] > ms) break; best = dataMs[j]; }
-      return best;
+      var lo = 0, hi = dataMs.length;
+      while (lo < hi) { var mid = (lo + hi) >> 1; if (dataMs[mid] <= ms) lo = mid + 1; else hi = mid; }
+      return lo > 0 ? dataMs[lo - 1] : NaN;
     }
     for (i = 0; i < events.length; i++) {
       ev = events[i];
@@ -352,13 +444,19 @@ window.DV = window.DV || {};
        player snapshots, because those rows are only written when the value
        CHANGES, which measures how often players come and go (minutes) rather
        than how often we looked (seconds). */
-    var pollMs = inferPoll(tiles.map(function (x) { return x.capMs; }));
+    // Built once and shared by inferPoll and groupErrors below; it was previously
+    // materialised twice. Already ascending, since tiles are polled in order.
+    var tileCapMs = [];
+    for (i = 0; i < tiles.length; i++) tileCapMs.push(tiles[i].capMs);
+    tileCapMs.sort(function (a, b) { return a - b; });
+
+    var pollMs = inferPoll(tileCapMs);
     var playerPollMs = pollMs;
     var playerChangeMs = inferPoll(snapshots.map(function (x) { return x.ms; }));
 
     /* ---- error windows ------------------------------------------------ */
-    var chunkWindows = groupErrors(chunkErrors, pollMs, tiles.map(function (x) { return x.capMs; }), retention);
-    var playerWindows = groupErrors(playerErrors, pollMs, snapshots.map(function (x) { return x.ms; }), Infinity);
+    var chunkWindows = groupErrors(chunkErrors, pollMs, tileCapMs, retention);
+    var playerWindows = groupErrors(playerErrors, pollMs, snapshots, Infinity);
 
     /* ---- joins / leaves ---------------------------------------------- */
     /* Only ever derived by diffing two adjacent snapshots. Anything that could
@@ -417,6 +515,10 @@ window.DV = window.DV || {};
     /* Merge walk over two already-sorted arrays. For every tile we record the
        roster in force at its CORRECTED render time -- this is the join the whole
        skew correction exists to make possible. */
+    /* The summary counts assess() needs are tallied HERE, in the pass that
+       already visits every tile, rather than in four more full passes inside
+       assess() itself. */
+    var stats = { outsideCoverage: 0, whileEmpty: 0, truncated: 0, overfull: 0 };
     var si = -1;
     for (i = 0; i < tiles.length; i++) {
       var tm = tiles[i].tileMs;
@@ -425,6 +527,17 @@ window.DV = window.DV || {};
       tiles[i].online = act ? act.count : null;
       tiles[i].roster = act ? act.roster : [];
       tiles[i].inCoverage = covered(tm);
+      if (!tiles[i].inCoverage) stats.outsideCoverage++;
+      if (tiles[i].online === 0) stats.whileEmpty++;
+    }
+    stats.overfullExamples = [];
+    for (i = 0; i < snapshots.length; i++) {
+      if (snapshots[i].truncated) stats.truncated++;
+      if (snapshots[i].overfull) {
+        stats.overfull++;
+        // Only the handful the report actually prints; no need to collect them all.
+        if (stats.overfullExamples.length < 4) stats.overfullExamples.push(snapshots[i]);
+      }
     }
 
     /* ---- steppable event list --------------------------------------- */
@@ -444,7 +557,7 @@ window.DV = window.DV || {};
       snapshots: snapshots, transitions: transitions,
       chunkErrors: chunkErrors, playerErrors: playerErrors,
       chunkWindows: chunkWindows, playerWindows: playerWindows,
-      events: events, coverage: coverage, steps: steps, bounds: bounds,
+      events: events, coverage: coverage, steps: steps, bounds: bounds, stats: stats,
       blocksPerTile: bpt, retentionMs: retention,
       mapType: mapType, mapTypes: mapTypes, tilesAllMaps: allTiles.length,
       pollMs: pollMs, playerPollMs: playerPollMs, playerChangeMs: playerChangeMs,
@@ -480,9 +593,8 @@ window.DV = window.DV || {};
      tile happened to be hours later. Errors, on the other hand, are ALWAYS
      logged, once per failed poll. So the honest measure is the number of
      consecutive error rows times the poll cadence, and nothing else. */
-  function groupErrors(errs, pollMs, okMsList, retentionMs) {
+  function groupErrors(errs, pollMs, _ok, retentionMs) {
     if (!errs.length) return [];
-    var ok = okMsList.slice().sort(function (a, b) { return a - b; });
     var sorted = errs.slice().sort(function (a, b) { return a.ms - b.ms; });
     var out = [], cur = null;
     for (var i = 0; i < sorted.length; i++) {
@@ -508,15 +620,12 @@ window.DV = window.DV || {};
          whatever it still holds. Nothing is lost while the outage fits inside
          the retention buffer; past that, the oldest updates aged out. */
       w.lossy = w.spanMs > retentionMs;
-      // Nearest logged tiles either side, for context in the UI only -- never
-      // used to size the outage, for the reason in the comment above.
-      var prevOk = NaN, nextOk = NaN;
-      for (var j = 0; j < ok.length; j++) {
-        if (ok[j] < w.startMs) prevOk = ok[j];
-        if (ok[j] > w.lastMs) { nextOk = ok[j]; break; }
-      }
-      w.prevOkMs = prevOk; w.nextOkMs = nextOk;
-      w.quietMs = (isFinite(nextOk) && isFinite(prevOk)) ? nextOk - prevOk : NaN;
+      /* Deliberately NOT recording the nearest logged tiles either side. An
+         earlier version did, scanning the whole tile list per window (O(windows x
+         rows) on every rebuild) to fill fields nothing consumed -- and worse, the
+         comment above explains those numbers must never be used to size an
+         outage, so keeping them on the object invited exactly the bug that
+         comment warns about. */
     }
     return out;
   }
@@ -619,30 +728,30 @@ window.DV = window.DV || {};
           uniqReasons(m.playerWindows) + "." });
     }
 
-    var trunc = m.snapshots.filter(function (x) { return x.truncated; });
-    if (trunc.length) {
+    var trunc = m.stats.truncated;
+    if (trunc) {
       q.push({ severity: "serious", code: "sample-cap",
-        title: trunc.length + " snapshot" + (trunc.length > 1 ? "s" : "") + " where the count exceeds the named players",
+        title: trunc + " snapshot" + (trunc > 1 ? "s" : "") + " where the count exceeds the named players",
         detail: "Server List Ping only returns a sample of names and this server capped it, so those rosters are incomplete and derived joins/leaves there are marked uncertain. Counts stay trustworthy." });
     }
 
-    var over = m.snapshots.filter(function (x) { return x.overfull; });
-    if (over.length) {
+    var over = m.stats.overfull;
+    if (over) {
       q.push({ severity: "warning", code: "count-below-roster",
-        title: over.length + " snapshot" + (over.length > 1 ? "s" : "") + " list a player while reporting a lower count",
+        title: over + " snapshot" + (over > 1 ? "s" : "") + " list a player while reporting a lower count",
         detail: "The server's own status reply was internally inconsistent (typically a stale name sample caught right at a disconnect). Trust the names less than the count here: " +
-          over.slice(0, 4).map(function (x) { return fmtTime(x.ms) + " (count " + x.count + ", " + x.roster.length + " named)"; }).join(", ") +
-          (over.length > 4 ? ", ..." : "") + "." });
+          m.stats.overfullExamples.map(function (x) { return fmtTime(x.ms) + " (count " + x.count + ", " + x.roster.length + " named)"; }).join(", ") +
+          (over > m.stats.overfullExamples.length ? ", ..." : "") + "." });
     }
 
-    var orphan = m.tiles.filter(function (t) { return !t.inCoverage; }).length;
+    var orphan = m.stats.outsideCoverage;
     if (orphan) {
       q.push({ severity: "warning", code: "tile-outside-coverage",
         title: orphan.toLocaleString() + " tile" + (orphan > 1 ? "s" : "") + " corrected to a time with no tracker running",
         detail: "Their corrected render time lands just outside a run -- expected right at a start/stop boundary, since a tile can render before the tracker was listening and only be picked up after. Not a fault unless the number is large." });
     }
 
-    var idle = m.tiles.filter(function (t) { return t.online === 0; }).length;
+    var idle = m.stats.whileEmpty;
     if (idle && m.tiles.length) {
       q.push({ severity: "info", code: "changes-while-empty",
         title: (100 * idle / m.tiles.length).toFixed(1) + "% of tile changes happened with nobody online",
@@ -719,6 +828,8 @@ window.DV = window.DV || {};
     tileWorld: tileWorld, tileChunk: tileChunk, historicalName: historicalName,
     BLOCKS_PER_TILE: BLOCKS_PER_TILE, RETENTION_MS: RETENTION_MS,
     fmtTime: fmtTime, fmtStamp: fmtStamp, fmtDate: fmtDate, fmtDur: fmtDur, fmtSigned: fmtSigned,
-    toLocalInput: toLocalInput, fromLocalInput: fromLocalInput, pct: pct
+    toLocalInput: toLocalInput, fromLocalInput: fromLocalInput, pct: pct,
+    // Shared sorted-array helpers -- the one implementation for every hot path.
+    lowerBound: lowerBound, atOrBefore: atOrBefore, sliceRange: sliceRange
   };
 })(window.DV);
