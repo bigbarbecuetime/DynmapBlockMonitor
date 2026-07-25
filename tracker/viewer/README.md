@@ -139,7 +139,10 @@ writes no row at all.
 
 ## Beyond plotting
 
-**Tracks** are their own map view, since they combine several sources. A leg is
+**Tracks** are a checkbox, not a view mode, so they overlay whichever map you are
+looking at. Their points are stored in WORLD coordinates and projected through
+the active map's matrix, so the same track draws correctly on the flat map and
+on a skewed isometric one. A leg is
 labelled by its measured speed, cut at the game's own numbers: `stationary`
 (<1 b/s), `walking` (<5, the game's walk is 4.3), `sprinting` (<8), `horse/boat`
 (<15), `fast` (<80, ice boat or elytra), and above that nothing on foot can

@@ -207,6 +207,88 @@ window.DV = window.DV || {};
      linking suggested 3.8-8.5.
 
      Chunks, not tiles, are counted: two tiles of the same chunk are one load. */
+  /* ==========================================================================
+     TURNING ANY MAP TYPE'S TILE INTO A WORLD POSITION
+     --------------------------------------------------------------------------
+     Every map is a linear projection of the world, so each is invertible -- but
+     only two of the three world axes are pinned by a 2D tile, and which two
+     depends on the projection:
+
+       flat2  mapX = 16x, mapY = -16z          -> x and z directly, y unknown
+       t      mapX = 11.31(x-z)                -> pins (x-z) exactly
+              mapY = -5.66(x+z) + 13.86y       -> mixes the other axis WITH height
+
+     So an isometric tile fixes one diagonal precisely and leaves the other
+     smeared by however wrong the assumed height is. Inverting at a nominal y=64
+     still gives a usable position, just a looser one, and the smear is quantified
+     here rather than hidden: a height error dy displaces the answer along the
+     anti-diagonal by (a4/det)*dy per axis.
+
+     Worth doing because the isometric maps fire far more often than the flat one
+     -- 7,388 events to 975 over the same period, since one chunk's projected
+     column crosses several isometric tiles -- so they cover moments the flat map
+     misses entirely. Flat tiles set position when present; isometric tiles fill
+     the gaps, carrying a bigger error bar.
+     ======================================================================== */
+  function projector(mapCfg, nominalY) {
+    var a = mapCfg && mapCfg.worldtomap;
+    if (!a) return null;
+    var s = tileSizeOf(mapCfg);
+    var y = nominalY === undefined ? 64 : nominalY;
+    var A = a[0], B = a[2], C = a[3], D = a[5];
+    var det = A * D - B * C;
+    if (Math.abs(det) < 1e-9) return null;
+    // How far a 64-block height error moves the answer, in blocks.
+    var smear = Math.abs(a[4] * 64 / det) * Math.max(Math.abs(A), Math.abs(B));
+    return {
+      smear: smear,
+      // Tile centre -> world (x, z) at the nominal height.
+      toWorld: function (tx, tz) {
+        var mx = (tx + 0.5) * s - a[1] * y;
+        var my = (tz + 0.5) * s - a[4] * y;
+        return { x: (D * mx - B * my) / det, z: (-C * mx + A * my) / det };
+      }
+    };
+  }
+
+  /* Every logged tile, from every map type, as a world position with an honest
+     error bar. Flat tiles are worth ~8 blocks; isometric ones however much the
+     height ambiguity smears them. */
+  function worldPoints(model, mapConfigs, opts) {
+    opts = opts || {};
+    var out = [];
+    var src = model.allTiles && model.allTiles.length ? model.allTiles : model.tiles;
+    var projs = {}, bpt = model.blocksPerTile;
+    for (var i = 0; i < src.length; i++) {
+      var t = src[i];
+      var cfg = mapConfigs ? mapConfigs[t.map] : null;
+      /* A tile from a map we cannot project is SKIPPED, never assumed flat.
+         Falling through to flat geometry here silently reinterpreted every
+         isometric tile as an overhead one -- the coordinates are in a different
+         space entirely, so the positions were nonsense and the tracks built on
+         them agreed with the player count only 7% of the time, against 36% once
+         the projection was applied. Wrong data is worse than less data. */
+      if (t.map !== model.mapType && !cfg) continue;
+      if (t.map === model.mapType) {
+        // The map the model is built on: use the exact tile geometry.
+        var w = M.tileWorld(t.tx, t.tz, bpt);
+        out.push({ ms: t.tileMs !== undefined ? t.tileMs : t.rawTileMs,
+                   x: (w.x0 + w.x1) / 2, z: (w.z0 + w.z1) / 2,
+                   err: bpt, map: t.map, kind: t.kind, online: t.online, roster: t.roster });
+        continue;
+      }
+      if (!(t.map in projs)) projs[t.map] = projector(cfg, opts.nominalY);
+      var pr = projs[t.map];
+      if (!pr) continue;
+      var p = pr.toWorld(t.tx, t.tz);
+      out.push({ ms: t.tileMs !== undefined ? t.tileMs : (t.rawTileMs - (model.skew ? model.skew.ms : 0)),
+                 x: p.x, z: p.z, err: Math.max(bpt, pr.smear), map: t.map,
+                 kind: t.kind, online: t.online, roster: t.roster });
+    }
+    out.sort(function (a, b) { return a.ms - b.ms; });
+    return out;
+  }
+
   function buildTracks(model, opts) {
     opts = opts || {};
     var sliceMs = opts.sliceMs === undefined ? 20000 : opts.sliceMs;
@@ -214,8 +296,11 @@ window.DV = window.DV || {};
     // A player cannot cross more than this many tiles between slices. 12 tiles
     // over 20s is ~4.8 blocks/s, near sprinting; boats and elytra get the slack
     // from maxDist scaling with the slice length.
-    var maxStep = opts.maxStep === undefined ? Math.max(8, 12 * (sliceMs / 20000)) : opts.maxStep;
-    var clusterRadius = opts.clusterRadius === undefined ? 22 : opts.clusterRadius;
+    // In BLOCKS now: ~96 blocks over 20s is about 4.8 b/s, near sprinting.
+    var maxStep = opts.maxStep === undefined ? Math.max(64, 96 * (sliceMs / 20000)) : opts.maxStep;
+    // Twice the measured load-disc radius (86 blocks), so one player's disc
+    // stays whole while two players in different places stay apart.
+    var clusterRadius = opts.clusterRadius === undefined ? 176 : opts.clusterRadius;
     var minPoints = opts.minPoints === undefined ? 3 : opts.minPoints;
     var from = opts.from === undefined ? -Infinity : opts.from;
     var to = opts.to === undefined ? Infinity : opts.to;
@@ -226,40 +311,66 @@ window.DV = window.DV || {};
        slice can yield more than one estimate. Single-linkage at roughly twice the
        view radius keeps one player's disc together without merging two players
        who happen to be loading at the same moment. */
-    var tiles = model.tiles, nodes = [];
-    var i = M.lowerBound(tiles, from, "tileMs");
+    /* Source points: every map type when a projection table is supplied,
+       otherwise just the model's own map. Each carries its own error, so a slice
+       fed only by isometric tiles is marked as the looser estimate it is. */
+    var pts = opts.worldPoints || worldPoints(model, opts.mapConfigs, opts);
+    var nodes = [];
+    var i = M.lowerBound(pts, from, "ms");
     var slice = [], sliceStart = null;
 
     function flushSlice() {
       if (!slice.length) return;
-      var groups = clusterTiles(slice, clusterRadius);
+      /* PRECISION FIRST. A flat tile fixes position to 8 blocks; an isometric one
+         to about 78, because inverting it needs a height we do not know (verified
+         against the world spawn: 38 blocks off at a nominal y=64, 5 blocks off at
+         the true height). The isometric maps also fire roughly seven times more
+         often, so mixing the two lets the loose majority drag every centroid and
+         scatter the clusters -- which is what happened: tracks went to zero.
+
+         So use the precise source when it exists, and fall back to the loose one
+         only for moments the flat map missed entirely. That keeps the ~10% extra
+         time coverage the isometric maps genuinely add without paying for it in
+         position. */
+      var precise = [];
+      var preciseErr = (model.blocksPerTile || 8) * 2;
+      for (var q = 0; q < slice.length; q++) if (slice[q].err <= preciseErr) precise.push(slice[q]);
+      var use = precise.length ? precise : slice;
+      var groups = clusterTiles(use, clusterRadius);
+      var looseOnly = !precise.length;
       for (var g = 0; g < groups.length; g++) {
-        var pts = groups[g];
-        // Dedupe to chunks: one tile stands in for its whole chunk.
-        var chunks = new Map();
-        var sx = 0, sz = 0;
-        for (var k = 0; k < pts.length; k++) {
-          chunks.set(pts[k].cx + "," + pts[k].cz, true);
-          sx += pts[k].tx; sz += pts[k].tz;
+        var grp = groups[g];
+        /* Weighted centroid: a flat tile is worth ~8 blocks, an isometric one
+           however far the height ambiguity smears it, so the precise sources
+           pull the estimate and the loose ones only fill in. */
+        var chunks = new Map(), maps = {};
+        var sx = 0, sz = 0, sw = 0;
+        for (var k = 0; k < grp.length; k++) {
+          var wgt = 1 / Math.max(1, grp[k].err * grp[k].err);
+          sx += grp[k].x * wgt; sz += grp[k].z * wgt; sw += wgt;
+          chunks.set(Math.floor(grp[k].x / 16) + "," + Math.floor(grp[k].z / 16), true);
+          maps[grp[k].map] = (maps[grp[k].map] || 0) + 1;
         }
-        var cx = sx / pts.length, cz = sz / pts.length;
+        var cx = sx / sw, cz = sz / sw;
         var rad = 0;
-        for (k = 0; k < pts.length; k++) rad += Math.hypot(pts[k].tx - cx, pts[k].tz - cz);
+        for (k = 0; k < grp.length; k++) rad += Math.hypot(grp[k].x - cx, grp[k].z - cz);
         nodes.push({
-          ms: sliceStart + sliceMs / 2, cx: cx, cz: cz,
-          tiles: pts.length, chunks: chunks.size,
-          radius: pts.length ? rad / pts.length : 0,
-          online: pts[pts.length - 1].online, roster: pts[pts.length - 1].roster
+          ms: sliceStart + sliceMs / 2, cx: cx, cz: cz,      // WORLD blocks
+          tiles: grp.length, chunks: chunks.size, maps: maps,
+          radius: grp.length ? rad / grp.length : 0,          // blocks
+          err: Math.sqrt(1 / sw), loose: looseOnly,
+          online: grp[grp.length - 1].online, roster: grp[grp.length - 1].roster
         });
       }
       slice = [];
     }
 
-    for (; i < tiles.length; i++) {
-      var t = tiles[i];
-      if (t.tileMs > to) break;
-      if (kinds !== "all" && t.kind !== kinds) continue;
-      var bucket = Math.floor(t.tileMs / sliceMs) * sliceMs;
+    for (; i < pts.length; i++) {
+      var t = pts[i];
+      if (t.ms > to) break;
+      if (kinds !== "all" && t.kind && t.kind !== kinds) continue;
+      // .ms, not .tileMs: these are world points from any map, not flat tiles.
+      var bucket = Math.floor(t.ms / sliceMs) * sliceMs;
       if (sliceStart === null) sliceStart = bucket;
       if (bucket !== sliceStart) { flushSlice(); sliceStart = bucket; }
       slice.push(t);
@@ -272,6 +383,13 @@ window.DV = window.DV || {};
       var nd = nodes[n];
       for (var k2 = open.length - 1; k2 >= 0; k2--) {
         if (nd.ms - open[k2].lastMs > maxGapMs) { done.push(open[k2]); open.splice(k2, 1); }
+      }
+      /* Linking is O(nodes x open). If a pathological input leaves hundreds of
+         tracks open at once the whole build crawls, so retire the stalest rather
+         than degrade without saying why. */
+      if (open.length > 64) {
+        open.sort(function (x, y) { return x.lastMs - y.lastMs; });
+        while (open.length > 64) done.push(open.shift());
       }
       var best = null, bestD = Infinity;
       for (k2 = 0; k2 < open.length; k2++) {
@@ -303,12 +421,12 @@ window.DV = window.DV || {};
       tr.durationMs = tr.lastMs - tr.startMs;
       tr.spanTiles = Math.hypot(tr.maxTx - tr.minTx, tr.maxTz - tr.minTz);
       var bpt = model.blocksPerTile;
-      tr.blocksTravelled = Math.round(tr.dist * bpt);
+      tr.blocksTravelled = Math.round(tr.dist);
       // The disc the loads sat in, in blocks -- roughly the render distance, and
       // the honest error bar on any single position estimate along this path.
       var rsum = 0;
       tr.points.forEach(function (p) { rsum += (p.radius || 0); });
-      tr.loadRadiusBlocks = Math.round(rsum / tr.points.length * bpt);
+      tr.loadRadiusBlocks = Math.round(rsum / tr.points.length);
       tr.speedBlocksPerSec = tr.durationMs > 0 ? tr.blocksTravelled / (tr.durationMs / 1000) : 0;
 
       /* Attribution, only where the roster permits it. One player online for the
@@ -340,7 +458,7 @@ window.DV = window.DV || {};
       var hit = [];
       for (var g = 0; g < groups.length; g++) {
         for (var j = 0; j < groups[g].length; j++) {
-          if (Math.hypot(pts[i].tx - groups[g][j].tx, pts[i].tz - groups[g][j].tz) <= radius) {
+          if (Math.hypot(pts[i].x - groups[g][j].x, pts[i].z - groups[g][j].z) <= radius) {
             hit.push(g); break;
           }
         }
@@ -415,7 +533,7 @@ window.DV = window.DV || {};
     for (var i = 1; i < tr.points.length; i++) {
       var a = tr.points[i - 1], b = tr.points[i];
       var dt = (b.ms - a.ms) / 1000;
-      var dist = Math.hypot(b.tx - a.tx, b.tz - a.tz) * bpt;
+      var dist = Math.hypot(b.tx - a.tx, b.tz - a.tz);   // already blocks
       if (dt <= 0) continue;
       var bps = dist / dt;
       var gapped = (b.ms - a.ms) > gapMs;
@@ -448,7 +566,7 @@ window.DV = window.DV || {};
         }
         if (dist <= 50 && dt < 5) { ev.kind = "pearl"; ev.explains = "within ender-pearl range"; }
         if (portals) {
-          ev.nearestPortal = nearestPortal(portals, b.tx * bpt, b.tz * bpt);
+          ev.nearestPortal = nearestPortal(portals, b.tx, b.tz);
           if (ev.nearestPortal && ev.nearestPortal.distBlocks <= PORTAL_CONFIRM_BLOCKS) {
             ev.explains = (ev.explains ? ev.explains + "; " : "") +
               "arrives " + Math.round(ev.nearestPortal.distBlocks) + " blocks from the public portal \"" +
@@ -504,7 +622,7 @@ window.DV = window.DV || {};
       if (!best) continue;
 
       var dt = (best.startMs - a.lastMs) / 1000;
-      var dist = Math.hypot(best.points[0].tx - a.lastTx, best.points[0].tz - a.lastTz) * bpt;
+      var dist = Math.hypot(best.points[0].tx - a.lastTx, best.points[0].tz - a.lastTz);
       if (dt <= 0) continue;
       var bps = dist / dt;
       // A plausible walk across the gap needs no special explanation.
@@ -529,8 +647,8 @@ window.DV = window.DV || {};
         if (dist <= 50) ev.kind = "pearl";
       }
       if (portals) {
-        var pFrom = nearestPortal(portals, a.lastTx * bpt, a.lastTz * bpt);
-        var pTo = nearestPortal(portals, ev.toTx * bpt, ev.toTz * bpt);
+        var pFrom = nearestPortal(portals, a.lastTx, a.lastTz);
+        var pTo = nearestPortal(portals, ev.toTx, ev.toTz);
         ev.portalFrom = pFrom; ev.portalTo = pTo;
         /* Both ends near a public portal is the strongest confirmation available
            without server logs: the player vanished by one and reappeared by
@@ -582,9 +700,9 @@ window.DV = window.DV || {};
      estimate is itself good to about that, which needs enough loads to average
      the disc down. */
   function positionError(point) {
-    var r = (point && point.radius) || 0;              // in tiles
+    var r = (point && point.radius) || 0;              // blocks
     var n = Math.max(1, (point && point.chunks) || 1);
-    return r * 8 / Math.sqrt(n);                       // blocks
+    return r / Math.sqrt(n);
   }
 
   /* How well does the track count match the number of people actually online?
@@ -656,7 +774,7 @@ window.DV = window.DV || {};
   }
 
   DV.infer = {
-    worldToTile: worldToTile, heightBand: heightBand, inferHeights: inferHeights,
+    worldToTile: worldToTile, worldPoints: worldPoints, projector: projector, heightBand: heightBand, inferHeights: inferHeights,
     buildTracks: buildTracks, scoreTracks: scoreTracks,
     annotateTrack: annotateTrack, classifySpeed: classifySpeed, MODES: MODES,
     nearestPortal: nearestPortal, parsePortals: parsePortals, parseHighways: parseHighways,

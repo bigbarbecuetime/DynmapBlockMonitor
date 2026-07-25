@@ -576,24 +576,39 @@ window.DV = window.DV || {};
         ctx.lineWidth = 2;
         ctx.globalAlpha = tr.confident ? 0.9 : 0.5;   // unattributed tracks recede
         ctx.beginPath();
+        /* Track points are WORLD coordinates, so they go through the active
+           map's projection like everything else -- which is what lets the same
+           track draw correctly on the flat map and on a skewed isometric one. */
         for (var j = 0; j < pts.length; j++) {
-          var c = cellRect(pts[j].tx, pts[j].tz);
-          var x = c.x + c.s / 2, y = c.y + c.s / 2;
-          if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          var q = worldToScreen(pts[j].tx, pts[j].tz, 64);
+          if (j === 0) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
         }
         ctx.stroke();
-        // head of the track = where it got to
-        var last = cellRect(pts[pts.length - 1].tx, pts[pts.length - 1].tz);
+
+        var last = worldToScreen(pts[pts.length - 1].tx, pts[pts.length - 1].tz, 64);
+        /* The head is drawn as the load DISC, not a dot: the estimate is the
+           centre of a ring of loaded chunks about 86 blocks across, and drawing a
+           point would claim a precision we do not have. */
+        var rad = (pts[pts.length - 1].radius || 0);
+        if (rad > 0 && state.scale >= 0.5) {
+          var edge = worldToScreen(pts[pts.length - 1].tx + rad, pts[pts.length - 1].tz, 64);
+          var rpx = Math.abs(edge.x - last.x);
+          if (rpx > 3 && rpx < 400) {
+            ctx.globalAlpha = 0.13;
+            ctx.fillStyle = col;
+            ctx.beginPath(); ctx.arc(last.x, last.y, rpx, 0, 6.2832); ctx.fill();
+          }
+        }
         ctx.globalAlpha = 1;
         ctx.fillStyle = col;
         ctx.beginPath();
-        ctx.arc(last.x + last.s / 2, last.y + last.s / 2, 4, 0, 6.2832);
+        ctx.arc(last.x, last.y, 4, 0, 6.2832);
         ctx.fill();
         if (tr.player && state.scale >= 1.5) {
           ctx.font = "10px system-ui, -apple-system, sans-serif";
           ctx.textAlign = "center";
           ctx.fillStyle = pal.text1;
-          ctx.fillText(tr.player, last.x + last.s / 2, last.y + last.s / 2 - 8);
+          ctx.fillText(tr.player, last.x, last.y - 8);
         }
       }
       ctx.restore();
@@ -608,8 +623,8 @@ window.DV = window.DV || {};
       for (var i = 0; i < trackEvents.length; i++) {
         var e = trackEvents[i];
         if (e.endMs < state.t0 || e.ms > state.cursor) continue;
-        var a = cellRect(Math.round(e.fromTx), Math.round(e.fromTz));
-        var b = cellRect(Math.round(e.toTx), Math.round(e.toTz));
+        var a = worldToScreen(e.fromTx, e.fromTz, 64);
+        var b = worldToScreen(e.toTx, e.toTz, 64);
         /* Dash pattern carries confidence. A jump we can account for -- both ends
            by a public portal, a nether pace that works out, or a distance inside
            ender-pearl range -- gets an even dash: a real connection the player
@@ -621,12 +636,12 @@ window.DV = window.DV || {};
         ctx.lineWidth = explained ? 1.5 : 1;
         ctx.globalAlpha = explained ? 0.85 : 0.5;
         ctx.beginPath();
-        ctx.moveTo(a.x + a.s / 2, a.y + a.s / 2);
-        ctx.lineTo(b.x + b.s / 2, b.y + b.s / 2);
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle = ctx.strokeStyle;
-        ctx.beginPath(); ctx.arc(b.x + b.s / 2, b.y + b.s / 2, 3.5, 0, 6.2832); ctx.fill();
+        ctx.beginPath(); ctx.arc(b.x, b.y, 3.5, 0, 6.2832); ctx.fill();
         ctx.setLineDash([4, 4]);
       }
       ctx.restore();

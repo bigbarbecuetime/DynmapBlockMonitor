@@ -50,7 +50,7 @@
         halfLifeMs: map.get("halfLifeMs"), imageSource: map.get("imageSource"),
         fillContext: map.get("fillContext"), showGrid: map.get("showGrid"), showRuler: map.get("showRuler"),
         showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"),
-        showPortals: map.get("showPortals"), politicalOn: !!state.politicalOn,
+        showPortals: map.get("showPortals"), showTracks: map.get("showTracks"), politicalOn: !!state.politicalOn,
         skewOverride: state.skewOverride, blocksPerTile: state.blocksPerTile, mapType: state.mapType,
         corrWindowMs: state.corrWindowMs, dataBase: state.dataBase, livePollMs: state.livePollMs,
         theme: document.documentElement.getAttribute("data-theme") || "",
@@ -506,8 +506,13 @@
       lastModelRendered = m;
       // Tracks: only built when asked for -- linking is O(tiles) and pointless
     // unless the layer or the panel is actually being looked at.
-    if (map.get("mode") === "tracks") {
-      state.tracks = DV.infer.buildTracks(m, { maxGapMs: 60000, maxDist: 32, from: w.t0, to: w.t1 });
+    if (map.get("showTracks")) {
+      state.tracks = DV.infer.buildTracks(m, {
+        from: w.t0, to: w.t1, portals: state.portals,
+        // Every map type contributes: the isometric maps fire far more often
+        // than the flat one and cover moments it misses entirely.
+        mapConfigs: state.mapConfigs
+      });
       state.trackScore = DV.infer.scoreTracks(m, state.tracks, { from: w.t0, to: w.t1 });
       state.trackEvents = DV.infer.linkEvents(state.tracks, m, { portals: state.portals });
       map.setTracks(state.tracks, state.trackEvents);
@@ -851,7 +856,8 @@
       showRuler: s.showRuler !== false,
       showMarkers: s.showMarkers !== false,
       tileKinds: s.tileKinds || "all",
-      showPortals: !!s.showPortals
+      showPortals: !!s.showPortals,
+      showTracks: !!s.showTracks
     });
     if (typeof s.speedIdx === "number") transport.setSpeedIndex(s.speedIdx);
     if (s.loop === false) transport.setLoop(false);
@@ -950,6 +956,7 @@
     $("tileKinds").value = map.get("tileKinds");
     $("showPortals").checked = map.get("showPortals");
     $("showPolitical").checked = !!state.politicalOn;
+    $("showTracks").checked = map.get("showTracks");
     $("halfLife").value = Math.round(map.get("halfLifeMs") / 1000);
     $("halfLifeVal").textContent = M.fmtDur(map.get("halfLifeMs"));
     $("halfLifeRow").hidden = map.get("heatMetric") !== "recency";
@@ -1094,6 +1101,10 @@
     $("showGrid").addEventListener("change", function () { map.set({ showGrid: this.checked }); saveSettings(); });
     $("showRuler").addEventListener("change", function () { map.set({ showRuler: this.checked }); saveSettings(); });
     $("showMarkers").addEventListener("change", function () { map.set({ showMarkers: this.checked }); saveSettings(); });
+    $("showTracks").addEventListener("change", function () {
+      map.set({ showTracks: this.checked });
+      invalidatePanels(); renderSlow(); saveSettings();
+    });
     $("showPortals").addEventListener("change", function () {
       map.set({ showPortals: this.checked });
       saveSettings();
