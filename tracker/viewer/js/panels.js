@@ -230,6 +230,37 @@ window.DV = window.DV || {};
       root.appendChild(fig);
     }
 
+    /* Notes about THIS tile rather than the whole file: a file-wide report says
+       nothing about the square you just clicked, which is usually the question. */
+    if (info.events.length) {
+      var loads = 0, edits = 0, offline = 0, uncovered = 0;
+      info.events.forEach(function (e) {
+        if (e.kind === "load") loads++; else edits++;
+        if (e.online === 0) offline++;
+        if (!e.inCoverage) uncovered++;
+      });
+      var notes = [];
+      if (edits === 0) {
+        notes.push(q("info", "○", "Every change here looks like a chunk load",
+          "All " + loads + " sit alone on the chunk boundary, which is what Dynmap does when it redraws a chunk someone walked into. Probably nobody built here &mdash; this is a place people pass through."));
+      } else if (loads === 0) {
+        notes.push(q("good", "✓", "Every change here looks like a real edit",
+          "All " + edits + " touched neighbouring tiles at the same time, which chunk loading does not do. Something was actually built or broken here."));
+      } else {
+        notes.push(q("info", "○", edits + " likely edit" + (edits > 1 ? "s" : "") + ", " + loads + " likely chunk load" + (loads > 1 ? "s" : ""),
+          "Mixed: people pass through here and at least some of the changes look like real building."));
+      }
+      if (offline) {
+        notes.push(q("warning", "⚠", offline + " change" + (offline > 1 ? "s" : "") + " here happened with nobody online",
+          "So those cannot be attributed to a player at all &mdash; the world ticks without them."));
+      }
+      if (uncovered) {
+        notes.push(q("warning", "⚠", uncovered + " change" + (uncovered > 1 ? "s" : "") + " landed outside a tracker run",
+          "Their timing is less certain; expected right at a start or stop."));
+      }
+      notes.forEach(function (h) { root.appendChild(el(h)); });
+    }
+
     if (info.events.length) {
       var list = el('<div class="feed"></div>');
       info.events.slice().reverse().slice(0, 60).forEach(function (t) {
