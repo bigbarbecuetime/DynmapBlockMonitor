@@ -28,7 +28,7 @@
     mapConfigs: null,        // per-map projection matrices, for height inference
     tracks: null, trackScore: null, trackEvents: null,
     portals: null, highways: null,
-    politicalDate: '', politicalDates: null,
+    politicalOn: false, politicalDate: '', politicalDates: null, politicalTiles: {},
     parseCache: {},          // memoised row parse, reused across rebuilds
     live: false, livePollMs: 5000, liveTimer: 0,
     tailChunks: null, tailPlayers: null,
@@ -50,7 +50,7 @@
         halfLifeMs: map.get("halfLifeMs"), imageSource: map.get("imageSource"),
         fillContext: map.get("fillContext"), showGrid: map.get("showGrid"), showRuler: map.get("showRuler"),
         showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"),
-        showPortals: map.get("showPortals"), politicalDate: state.politicalDate,
+        showPortals: map.get("showPortals"), politicalOn: !!state.politicalOn,
         skewOverride: state.skewOverride, blocksPerTile: state.blocksPerTile, mapType: state.mapType,
         corrWindowMs: state.corrWindowMs, dataBase: state.dataBase, livePollMs: state.livePollMs,
         theme: document.documentElement.getAttribute("data-theme") || "",
@@ -274,16 +274,49 @@
       .then(function (r) { return r.json(); })
       .then(function (dates) {
         state.politicalDates = dates;
-        var sel = $("politicalDate");
-        sel.innerHTML = '<option value="">off</option>';
-        dates.slice().reverse().forEach(function (d) {
-          var o = document.createElement("option");
-          o.value = d; o.textContent = d;
-          sel.appendChild(o);
-        });
-        if (state.politicalDate) sel.value = state.politicalDate;
+        syncPolitical(true);
       })
       .catch(function () { state.politicalDates = null; });
+  }
+
+  /* The political map that was current AT THE CURSOR -- the last snapshot taken
+     on or before it. Scrubbing the timeline therefore also moves the borders,
+     which is the whole point of having 339 of them: activity from 2019 should
+     not be drawn over 2026's map. */
+  function politicalDateFor(ms) {
+    var dates = state.politicalDates;
+    if (!dates || !dates.length || !isFinite(ms)) return null;
+    var d = new Date(ms);
+    var key = d.getUTCFullYear() + "-" +
+              String(d.getUTCMonth() + 1).padStart(2, "0") + "-" +
+              String(d.getUTCDate()).padStart(2, "0");
+    var lo = 0, hi = dates.length;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (dates[mid] <= key) lo = mid + 1; else hi = mid; }
+    // Before the first snapshot there is nothing to show; use the earliest.
+    return lo > 0 ? dates[lo - 1] : dates[0];
+  }
+
+  function syncPolitical(force) {
+    var label = $("politicalWhen");
+    if (!state.politicalOn) {
+      map.setPolitical(null);
+      if (label) label.textContent = "";
+      state.politicalDate = "";
+      return;
+    }
+    var want = politicalDateFor(transport.cursor);
+    if (!want) { if (label) label.textContent = " (loading…)"; return; }
+    if (label) label.textContent = " — " + want;
+    if (!force && want === state.politicalDate) return;
+    setPolitical(want);
+  }
+
+  function applyPolitical(date, names) {
+    map.setPolitical({
+      date: date, tiles: names, opacity: 0.55, maxLod: state.politicalMaxLod || 4,
+      // Tiles load straight from the source: an <img> needs no CORS.
+      base: "https://craftix.cx/mccivmap/elgeis/political/" + date
+    });
   }
 
   function setPolitical(date) {
@@ -299,11 +332,7 @@
       .then(function (r) { return r.text(); })
       .then(function (txt) {
         var names = new Set(txt.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean));
-        map.setPolitical({
-          date: date, tiles: names, opacity: 0.55, maxLod: state.politicalMaxLod || 4,
-          // Tiles load straight from the source: an <img> needs no CORS.
-          base: "https://craftix.cx/mccivmap/elgeis/political/" + date
-        });
+        applyPolitical(date, names);
       })
       .catch(function () { map.setPolitical(null); });
   }
@@ -522,6 +551,7 @@
     }
 
     renderHeatLegend();
+    syncPolitical(false);
     syncRangeInputs();
   }
 
@@ -764,6 +794,7 @@
     if (s.livePollMs) state.livePollMs = s.livePollMs;
     if (s.skewOverride !== undefined) state.skewOverride = s.skewOverride;
     if (s.mapType) state.mapType = s.mapType;
+    state.politicalOn = !!s.politicalOn;
 
     map = DV.createMap($("mapCanvas"), {
       dataBase: state.dataBase,
@@ -918,6 +949,7 @@
     $("showMarkers").checked = map.get("showMarkers");
     $("tileKinds").value = map.get("tileKinds");
     $("showPortals").checked = map.get("showPortals");
+    $("showPolitical").checked = !!state.politicalOn;
     $("halfLife").value = Math.round(map.get("halfLifeMs") / 1000);
     $("halfLifeVal").textContent = M.fmtDur(map.get("halfLifeMs"));
     $("halfLifeRow").hidden = map.get("heatMetric") !== "recency";
@@ -1066,8 +1098,9 @@
       map.set({ showPortals: this.checked });
       saveSettings();
     });
-    $("politicalDate").addEventListener("change", function () {
-      setPolitical(this.value);
+    $("showPolitical").addEventListener("change", function () {
+      state.politicalOn = this.checked;
+      syncPolitical(true);
       saveSettings();
     });
 

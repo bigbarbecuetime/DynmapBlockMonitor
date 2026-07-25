@@ -161,9 +161,18 @@ down to **4** at lod4, where 2×2 covers the whole 11008-block world), so the
 overlay draws at every zoom, stepping up a level as you zoom out rather than
 switching off — between 4 and 15 tiles on screen at any zoom. Note lod0 is
 published as `.png` and every zoomed-out level as `.jpg`; the extension is taken
-from `tile_list.txt` rather than assumed. The Nelt's 244 public portals and 61
-highway segments overlay on top; those tables are in **nether** coordinates, so
-overworld position is ×8.
+from `tile_list.txt` rather than assumed. It follows the cursor: the snapshot shown is the
+latest one taken on or before the moment you are looking at, so scrubbing back
+through the log moves the borders with it.
+
+The Nelt's 244 public portals and 61 highway segments overlay on top; those
+tables are in **nether** coordinates, so overworld position is ×8. A portal is
+only *named* in an event when the player was within **16 blocks** of it and our
+position estimate is itself good to 16 blocks — which, with a load-disc radius
+of ~86 blocks, currently almost never holds. At the 256 blocks this first used,
+92 events got a portal name; at 16, none do. Those attributions were coincidence,
+and confirming portal use needs better positional precision than chunk loads
+alone can give.
 
 **Isometric map types** are drawn through their own projection, not flattened:
 the world grid and the markers go through that map's `worldtomap`, so the world
@@ -201,6 +210,11 @@ axis. With `worldtomap` from `/up/configuration`:
 ```
 mapY = -5.6569·x + 13.8564·y - 5.6569·z      →  y is the only unknown
 ```
+
+The grid draws both units at once: the fine lines are the 8×8 **tile** Dynmap
+publishes, the heavier ones every second line are the 16×16 **chunk** the game
+actually loads (chunk boundaries fall on even tile coordinates). Zoomed out the
+tile grid drops away and the chunk grid stays.
 
 Pairing a flat tile with an isometric tile changed at the same moment pins Y to
 about **16 blocks** — verified against spawn, whose published height (88) lands

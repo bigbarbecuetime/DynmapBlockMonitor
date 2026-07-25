@@ -449,7 +449,7 @@ window.DV = window.DV || {};
         if (dist <= 50 && dt < 5) { ev.kind = "pearl"; ev.explains = "within ender-pearl range"; }
         if (portals) {
           ev.nearestPortal = nearestPortal(portals, b.tx * bpt, b.tz * bpt);
-          if (ev.nearestPortal && ev.nearestPortal.distBlocks < 256) {
+          if (ev.nearestPortal && ev.nearestPortal.distBlocks <= PORTAL_CONFIRM_BLOCKS) {
             ev.explains = (ev.explains ? ev.explains + "; " : "") +
               "arrives " + Math.round(ev.nearestPortal.distBlocks) + " blocks from the public portal \"" +
               ev.nearestPortal.name + "\"";
@@ -535,11 +535,21 @@ window.DV = window.DV || {};
         /* Both ends near a public portal is the strongest confirmation available
            without server logs: the player vanished by one and reappeared by
            another, which is what using the highway looks like from outside. */
-        if (pFrom && pTo && pFrom.distBlocks < 256 && pTo.distBlocks < 256) {
+        /* Only claim a portal when the player really was AT it: within 16 blocks,
+           and with a position estimate good enough for 16 blocks to mean
+           something. At the 256 blocks this used, half the map qualifies and
+           several portals are usually in range at once -- it named a portal for
+           92 events on coincidence alone. */
+        var errFrom = positionError(a.points[a.points.length - 1]);
+        var errTo = positionError(best.points[0]);
+        ev.posErrorBlocks = Math.round(Math.max(errFrom, errTo));
+        var sureFrom = pFrom && pFrom.distBlocks <= PORTAL_CONFIRM_BLOCKS && errFrom <= PORTAL_CONFIRM_BLOCKS;
+        var sureTo = pTo && pTo.distBlocks <= PORTAL_CONFIRM_BLOCKS && errTo <= PORTAL_CONFIRM_BLOCKS;
+        if (sureFrom && sureTo) {
           ev.kind = "portal";
-          ev.explains = "left near \"" + pFrom.name + "\" and arrived near \"" + pTo.name +
-            "\" (" + Math.round(pFrom.distBlocks) + " and " + Math.round(pTo.distBlocks) + " blocks)";
-        } else if (pTo && pTo.distBlocks < 256) {
+          ev.explains = "left \"" + pFrom.name + "\" and arrived at \"" + pTo.name +
+            "\" (" + Math.round(pFrom.distBlocks) + " and " + Math.round(pTo.distBlocks) + " blocks away)";
+        } else if (sureTo) {
           ev.explains = (ev.explains ? ev.explains + "; " : "") +
             "arrives " + Math.round(pTo.distBlocks) + " blocks from the public portal \"" + pTo.name + "\"";
         }
@@ -560,6 +570,21 @@ window.DV = window.DV || {};
       if (!best || d < best.distBlocks) best = { name: p.name, x: ox, z: oz, distBlocks: d, entity: p.entity };
     }
     return best;
+  }
+
+  /* How close a player must be before we will say they used a given portal.
+     A portal is a single block: standing "near" one at 256 blocks means nothing,
+     and at that range several portals are usually in reach anyway. */
+  var PORTAL_CONFIRM_BLOCKS = 16;
+
+  /* Our position estimate is the centroid of a disc of loaded chunks, so it
+     carries real error. Claiming a 16-block coincidence is only honest when the
+     estimate is itself good to about that, which needs enough loads to average
+     the disc down. */
+  function positionError(point) {
+    var r = (point && point.radius) || 0;              // in tiles
+    var n = Math.max(1, (point && point.chunks) || 1);
+    return r * 8 / Math.sqrt(n);                       // blocks
   }
 
   /* How well does the track count match the number of people actually online?

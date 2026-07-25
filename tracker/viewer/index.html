@@ -107,17 +107,13 @@
         </div>
 
         <label class="chk"><input type="checkbox" id="fillContext"> Also fetch unchanged tiles for context</label>
-        <label class="chk"><input type="checkbox" id="showGrid" checked> Tile grid</label>
+        <label class="chk"><input type="checkbox" id="showGrid" checked> Tile grid (8&times;8) &amp; chunks (16&times;16)</label>
         <label class="chk"><input type="checkbox" id="showRuler" checked> Coordinate ruler</label>
         <label class="chk"><input type="checkbox" id="showMarkers" checked> World border &amp; markers</label>
         <label class="chk"><input type="checkbox" id="showPortals"> Nether portals &amp; highway (Nelt)</label>
 
-        <div class="row" style="margin-top:8px">
-          <div class="field">
-            <span>Political map underlay</span>
-            <select id="politicalDate"><option value="">off</option></select>
-          </div>
-        </div>
+        <label class="chk"><input type="checkbox" id="showPolitical"> Political map underlay
+          <span id="politicalWhen" style="color:var(--text-3);font-size:11px"></span></label>
 
         <div class="row" style="margin-top:8px">
           <button class="btn" id="fitBtn" title="Frame all logged tiles (0)">Fit all</button>

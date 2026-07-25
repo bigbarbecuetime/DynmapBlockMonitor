@@ -387,21 +387,33 @@ window.DV = window.DV || {};
       }
 
       /* --- grid -------------------------------------------------------- */
-      if (state.showGrid && s >= 7) {
-        ctx.strokeStyle = pal.grid;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        for (var gx = vis.tx0; gx <= vis.tx1; gx++) {
-          var p = toScreen(gx, 0);
-          var x = Math.round(p.x) + 0.5;
-          ctx.moveTo(x, 0); ctx.lineTo(x, h);
+      if (state.showGrid && s >= 4) {
+        var vis2 = vis;
+        /* Two grids at once. The fine one is the 8x8 tile Dynmap actually
+           publishes; the heavier one every second line is the 16x16 CHUNK, which
+           is the unit the game loads and the unit the load/edit classification
+           is really about. Chunk boundaries fall on even tile coordinates, since
+           two tiles span one chunk. */
+        function gridLines(step, style, width) {
+          ctx.strokeStyle = style;
+          ctx.lineWidth = width;
+          ctx.beginPath();
+          var gx0 = Math.ceil(vis2.tx0 / step) * step;
+          for (var gx = gx0; gx <= vis2.tx1; gx += step) {
+            var p = toScreen(gx, 0);
+            var x = Math.round(p.x) + 0.5;
+            ctx.moveTo(x, 0); ctx.lineTo(x, h);
+          }
+          var gy0 = Math.ceil(-vis2.tz1 / step) * step;
+          for (var gy = gy0; gy <= -vis2.tz0; gy += step) {
+            var q = toScreen(0, gy);
+            var y = Math.round(q.y) + 0.5;
+            ctx.moveTo(0, y); ctx.lineTo(w, y);
+          }
+          ctx.stroke();
         }
-        for (var gy = -vis.tz1; gy <= -vis.tz0; gy++) {
-          var q = toScreen(0, gy);
-          var y = Math.round(q.y) + 0.5;
-          ctx.moveTo(0, y); ctx.lineTo(w, y);
-        }
-        ctx.stroke();
+        if (s >= 7) gridLines(1, pal.grid, 1);          // 8x8 tiles, once there is room
+        gridLines(2, pal.text3, s >= 7 ? 1 : 0.6);      // 16x16 chunks, always
       }
 
       /* --- world origin ------------------------------------------------ */
