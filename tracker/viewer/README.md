@@ -156,7 +156,12 @@ so an unexplained hop never reads as a route.
 **Layers.** Historical political maps come from craftix (339 snapshots,
 2018-09-08 to 2026-07-20), which publish at one pixel per block with
 `topLeft {-5504,-5504}` — the same frame as the world border — so they underlay
-the tile grid with no projection at all. The Nelt's 244 public portals and 61
+the tile grid with no projection at all. The pyramid is small (484 tiles at lod0
+down to **4** at lod4, where 2×2 covers the whole 11008-block world), so the
+overlay draws at every zoom, stepping up a level as you zoom out rather than
+switching off — between 4 and 15 tiles on screen at any zoom. Note lod0 is
+published as `.png` and every zoomed-out level as `.jpg`; the extension is taken
+from `tile_list.txt` rather than assumed. The Nelt's 244 public portals and 61
 highway segments overlay on top; those tables are in **nether** coordinates, so
 overworld position is ×8.
 

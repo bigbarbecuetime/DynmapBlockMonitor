@@ -102,6 +102,7 @@ window.DV = window.DV || {};
     var tracks = null;              // inferred player tracks, if built
     var trackEvents = null;         // teleports / nether crossings between them
     var portals = null, highways = null;
+    var politicalDrawn = 0, politicalLodUsed = -1;
     var suppressedImages = false;
     var needsDraw = false;
 
@@ -450,28 +451,57 @@ window.DV = window.DV || {};
        projection is needed, just a divide, which is why these line up with the
        flat map exactly. Only meaningful under a flat projection: the political
        map is drawn top-down, so it cannot be laid under a skewed view. */
+    /* The pyramid is small -- 484 tiles at lod0 down to 4 at lod4, where two by
+       two covers the entire 11008-block world -- so there is never a reason to
+       stop drawing. Step UP a level as you zoom out instead of bailing: each
+       level doubles the blocks per tile, so the number on screen stays in single
+       or double digits at every zoom. */
+    function politicalLod(pol, bpt) {
+      var maxLod = pol.maxLod === undefined ? 4 : pol.maxLod;
+      // Aim for tiles at least ~256px on screen; smaller means we are fetching
+      // far more of them than the detail is worth.
+      var lod = 0;
+      while (lod < maxLod && (512 * Math.pow(2, lod) / bpt) * state.scale < 256) lod++;
+      return lod;
+    }
+
     function drawPolitical() {
       var pol = state.political;
       if (!pol || !pol.date || !isFlatProjection()) return;
       var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
-      var gridPerTile = 512 / bpt;                    // grid units covered by one lod0 tile
+      var lod = politicalLod(pol, bpt);
+      var gridPerTile = (512 * Math.pow(2, lod)) / bpt;   // grid units per tile at this lod
       var a = toGrid(0, 0), b = toGrid(state.w, state.h);
       var x0 = Math.floor(a.gx / gridPerTile), x1 = Math.ceil(b.gx / gridPerTile);
       var z0 = Math.floor(a.gy / gridPerTile), z1 = Math.ceil(b.gy / gridPerTile);
-      if ((x1 - x0) * (z1 - z0) > 200) return;        // zoomed too far out to be worth it
       ctx.globalAlpha = pol.opacity === undefined ? 0.55 : pol.opacity;
       ctx.imageSmoothingEnabled = true;
+      politicalDrawn = 0;
       for (var tx = x0; tx <= x1; tx++) {
         for (var tz = z0; tz <= z1; tz++) {
-          var name = "lod0_x" + tx + "_z" + tz + ".png";
-          if (pol.tiles && !pol.tiles.has(name)) continue;
+          /* The extension is NOT uniform across the pyramid: lod0 is published as
+             .png and every zoomed-out level as .jpg. Hardcoding .png made all of
+             lod1-4 404, which looked exactly like "the overlay does not work when
+             zoomed out". Take it from the published list instead of assuming. */
+          var stem = "lod" + lod + "_x" + tx + "_z" + tz;
+          var name = null;
+          if (pol.tiles) {
+            if (pol.tiles.has(stem + ".png")) name = stem + ".png";
+            else if (pol.tiles.has(stem + ".jpg")) name = stem + ".jpg";
+            else continue;
+          } else {
+            name = stem + (lod === 0 ? ".png" : ".jpg");
+          }
           var e = getImage(pol.base + "/" + name);
           if (!e.ok || !e.img) continue;
           var p0 = toScreen(tx * gridPerTile, tz * gridPerTile);
           var p1 = toScreen((tx + 1) * gridPerTile, (tz + 1) * gridPerTile);
+          // +1 closes the sub-pixel seam between neighbouring tiles.
           ctx.drawImage(e.img, p0.x, p0.y, p1.x - p0.x + 1, p1.y - p0.y + 1);
+          politicalDrawn++;
         }
       }
+      politicalLodUsed = lod;
       ctx.globalAlpha = 1;
     }
 
@@ -1058,7 +1088,8 @@ window.DV = window.DV || {};
       heatLegend: heatLegend,
       status: function () {
         return { cells: heatCount, max: heatMax, suppressedImages: suppressedImages,
-                 scale: state.scale, loading: inflight + queue.length };
+                 scale: state.scale, loading: inflight + queue.length,
+                 politicalLod: politicalLodUsed, politicalTiles: politicalDrawn };
       },
       zoomBy: function (f) { setScale(state.scale * f, state.w / 2, state.h / 2); }
     };

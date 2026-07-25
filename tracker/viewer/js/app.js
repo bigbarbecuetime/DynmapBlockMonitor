@@ -289,12 +289,18 @@
   function setPolitical(date) {
     state.politicalDate = date || "";
     if (!date) { map.setPolitical(null); return; }
+    // maxLod comes from the snapshot's own metadata rather than being assumed;
+    // it is what decides how far the map can zoom out and still draw.
+    fetch("/api/political/" + date + "/metadata.json", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (md) { state.politicalMaxLod = md.maxLod; })
+      .catch(function () { state.politicalMaxLod = 4; });
     fetch("/api/political/" + date + "/tile_list.txt", { cache: "no-store" })
       .then(function (r) { return r.text(); })
       .then(function (txt) {
         var names = new Set(txt.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean));
         map.setPolitical({
-          date: date, tiles: names, opacity: 0.55,
+          date: date, tiles: names, opacity: 0.55, maxLod: state.politicalMaxLod || 4,
           // Tiles load straight from the source: an <img> needs no CORS.
           base: "https://craftix.cx/mccivmap/elgeis/political/" + date
         });
