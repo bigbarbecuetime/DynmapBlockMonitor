@@ -199,26 +199,46 @@ Each player keeps **one colour across all their tracks**, so separate visits to
 the same place are legible as the same person; unattributed tracks share a muted
 slot. Click a track for its details and events, and filter to one player by name.
 
-A calibration session (standing at a known spot, then a 52-block sprint, then a
-64-block walk) set the resolution limits: the load disc's centroid tracked the
-player's X almost exactly but carried a **~110-block standing bias** in Z —
-loads follow tickable terrain, which is not symmetric around the player, so the
-bias does not average out. Movements smaller than the combined position error
-(~85 blocks) are **below the noise floor** and are reported as `stationary`
-rather than invented as walking. Tracks are built from 60-second slices because
-the same session showed 20-second centroids hopping 100–200 blocks between disc
-fragments (phantom "sprinting" for a standing player) while 60-second centroids
-wander only 12–36.
+**A re-render does not mean a block changed.** Tiles were diffed live as they
+re-rendered and every one came back byte-identical — same picture, new
+timestamp. The trigger is a block changing anywhere in a chunk that happens to
+be *loaded*, and under a forest canopy the top-down map sees leaves either way.
+Loading is player-driven; changing is mob- and terrain-driven. So renders pile
+up wherever tickable terrain sits inside the loaded disc and stop dead where it
+does not.
+
+That is why the position estimate is the **centre of the extent** the renders
+cover, not their centre of mass. A calibration session (standing at a known
+spot, then a 52-block sprint, then a 64-block walk) sat beside a dark-oak forest
+to the north; the open stone the player actually stood on has not re-rendered
+since January. Averaging the renders walks the estimate into the forest —
+102/112/143 blocks off the three known positions — while the extent centre gives
+63/64/101, landing X within 2 blocks twice. Trimming the extent to 5–95% is
+worse (106), because the extreme points are exactly what pin the disc edge.
+
+The residual is nearly all Z, from the south half of the disc being clipped by
+ground too barren to ever report. Adding the disc radius to the northern edge
+scores 2 and 4 blocks on two legs — but that edge is a **fixed landmark**, not a
+disc boundary: the player moved 54 blocks between two legs and it moved 8, and
+across 13 independent windows over three days it varies by only 96 blocks. It is
+the treeline. Fitting to it would encode this one location into every track, so
+it is deliberately not used.
+
+Movements smaller than the combined position error (~85 blocks) are **below the
+noise floor** and are reported as `stationary` rather than invented as walking.
+Tracks are built from 60-second slices because the same session showed
+20-second estimates hopping 100–200 blocks between disc fragments (phantom
+"sprinting" for a standing player) while 60-second ones wander only 12–36.
 
 A loaded tile is **not** the player's position. Measured over 42.9h of
 single-player stretches, the tiles loading in any 30s window sit a median 10.8
 tiles (86 blocks, ~5.4 chunks) from the centre of the group — a view-distance
 disc around the player — and one 8×8 tile stands in for its whole 16×16 chunk
 (793 chunks contributed one tile; only 12 contributed all four). So a track is
-the chain of per-slice **centroids**, not of individual tiles. That matters: tile
-linking hops across the disc and inflated speed to 3.8–8.5 blocks/s, while
-centroids give 2.2 median / 3.3 p90 — matching the 2.2 measured directly from
-the solo stretches.
+the chain of per-slice **position estimates**, not of individual tiles. That
+matters: tile linking hops across the disc and inflated speed to 3.8–8.5
+blocks/s, while per-slice estimates give 2.2 median / 3.3 p90 — matching the 2.2
+measured directly from the solo stretches.
 
 Attribution has two tiers. A track whose every moment had exactly one player
 online is **confidently** theirs. Otherwise, a track that starts within a few

@@ -349,18 +349,41 @@ window.DV = window.DV || {};
       var looseOnly = !precise.length;
       for (var g = 0; g < groups.length; g++) {
         var grp = groups[g];
-        /* Weighted centroid: a flat tile is worth ~8 blocks, an isometric one
-           however far the height ambiguity smears it, so the precise sources
-           pull the estimate and the loose ones only fill in. */
+        /* Centre of the EXTENT, not of the density.
+
+           A re-render does not mean "a player was here". Diffing tiles live as
+           they re-rendered showed every one byte-identical: the picture never
+           changed, only the timestamp. So the trigger is a block changing in a
+           chunk that happens to be LOADED -- and under a forest canopy the flat
+           map sees leaves either way. Loading is player-driven, but changing is
+           mob- and terrain-driven, so renders pile up wherever tickable terrain
+           sits inside the loaded disc and stop dead where it does not.
+
+           At the calibration spot that terrain was a dark-oak forest to the
+           north; the open stone the player actually stood on has not re-rendered
+           since January. Averaging the renders therefore walks the estimate into
+           the forest -- 102/112/143 blocks off the three known positions. The
+           disc, though, is still centred on the player, so take the middle of
+           the span the renders cover rather than their centre of mass: 63/64/101
+           blocks off, and X lands within 2 blocks twice (2172 vs 2174, 2124 vs
+           2122). What is left is nearly pure Z, the south half of the disc being
+           clipped by ground too barren to ever report.
+
+           Trimming the span to 5-95% is worse (106 blocks), not better -- the
+           extreme points are exactly the ones that pin the disc edge. */
         var chunks = new Map(), maps = {};
-        var sx = 0, sz = 0, sw = 0;
+        var sw = 0;
+        var minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
         for (var k = 0; k < grp.length; k++) {
-          var wgt = 1 / Math.max(1, grp[k].err * grp[k].err);
-          sx += grp[k].x * wgt; sz += grp[k].z * wgt; sw += wgt;
+          sw += 1 / Math.max(1, grp[k].err * grp[k].err);
+          if (grp[k].x < minX) minX = grp[k].x;
+          if (grp[k].x > maxX) maxX = grp[k].x;
+          if (grp[k].z < minZ) minZ = grp[k].z;
+          if (grp[k].z > maxZ) maxZ = grp[k].z;
           chunks.set(Math.floor(grp[k].x / 16) + "," + Math.floor(grp[k].z / 16), true);
           maps[grp[k].map] = (maps[grp[k].map] || 0) + 1;
         }
-        var cx = sx / sw, cz = sz / sw;
+        var cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
         var rad = 0;
         for (k = 0; k < grp.length; k++) rad += Math.hypot(grp[k].x - cx, grp[k].z - cz);
         nodes.push({
@@ -368,12 +391,12 @@ window.DV = window.DV || {};
           tiles: grp.length, chunks: chunks.size, maps: maps,
           radius: grp.length ? rad / grp.length : 0,          // blocks
           /* NOT the formal sqrt(1/sum-weights): that says 2 blocks with fifteen
-             8-block tiles, and a calibration session (standing at a known spot,
-             (2174,63,-4837)) measured the real error at 64-152 blocks. The loads
-             are not scattered evenly around the player -- they follow tickable
-             terrain, which sat ~110 blocks north of the player for the whole
-             session -- so the bias does not shrink with more samples. The honest
-             uncertainty is tied to the disc radius itself. */
+             8-block tiles, while the three known positions of the calibration
+             session land 63-101 blocks from the extent centre. The renders are
+             not scattered evenly around the player -- they follow whatever
+             terrain is tickable inside the loaded disc -- so the bias does not
+             shrink with more samples. The honest uncertainty is tied to the disc
+             radius itself. */
           err: Math.max(Math.sqrt(1 / sw), (grp.length ? rad / grp.length : 0) * 0.6, 12),
           loose: looseOnly,
           online: grp[grp.length - 1].online, roster: grp[grp.length - 1].roster
