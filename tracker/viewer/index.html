@@ -276,6 +276,52 @@
       <div id="tilePanel"></div>
     </details>
 
+    <!-- Ground truth. The only place in the system that knows a real position,
+         so it is what every accuracy claim is scored against. The instant comes
+         from the cursor rather than a text field: you scrub to the moment, then
+         type where you actually were. -->
+    <details class="group" id="calGroup">
+      <summary>Calibration <span class="count" id="calCount"></span></summary>
+      <div class="group__body">
+        <div class="cal__at">at <b id="calWhen">--</b></div>
+        <div class="cal__row">
+          <label for="calPlayer">Player</label>
+          <input id="calPlayer" list="calPlayers" placeholder="name" autocomplete="off">
+          <datalist id="calPlayers"></datalist>
+        </div>
+        <div class="cal__row cal__row--xyz">
+          <label for="calX">X / Y / Z</label>
+          <input id="calX" type="number" step="1" placeholder="x" autocomplete="off">
+          <input id="calY" type="number" step="1" placeholder="y" autocomplete="off">
+          <input id="calZ" type="number" step="1" placeholder="z" autocomplete="off">
+        </div>
+        <div class="cal__row">
+          <label for="calActivity">Doing</label>
+          <select id="calActivity">
+            <option value="standing">standing still</option>
+            <option value="walking">walking</option>
+            <option value="running">running / sprinting</option>
+            <option value="mining">mining blocks</option>
+            <option value="building">placing blocks</option>
+            <option value="boat">boat</option>
+            <option value="horse">horse</option>
+            <option value="elytra">elytra</option>
+            <option value="portal">nether portal</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </div>
+        <div class="cal__row">
+          <label for="calNote">Note</label>
+          <input id="calNote" placeholder="optional" autocomplete="off">
+        </div>
+        <div class="cal__actions">
+          <button id="calAdd" class="btn btn--primary">Record position</button>
+          <span id="calStatus" class="cal__status"></span>
+        </div>
+        <div id="calList"></div>
+      </div>
+    </details>
+
     <details class="group">
       <summary>Player tracks <span class="count" id="trackCount"></span></summary>
       <div class="group__body" id="tracksPanel"></div>

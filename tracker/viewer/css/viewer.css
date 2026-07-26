@@ -601,3 +601,44 @@ kbd {
   padding: 0; margin: -1px; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
+
+/* ------------------------------------------------------- calibration ---- */
+/* Ground truth entry. Deliberately compact: it sits below several other groups
+   in the right panel, and the whole point is that recording a position is quick
+   enough to do repeatedly during a session. */
+
+.cal__at { font-size: 11.5px; color: var(--text-2); margin: 2px 0 8px; }
+.cal__at b { font-family: var(--mono); color: var(--text-1); font-weight: 600; }
+
+.cal__row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.cal__row > label { font-size: 11.5px; color: var(--text-2); flex: 0 0 62px; }
+.cal__row--xyz { gap: 4px; }
+.cal__row--xyz input { flex: 1 1 0; font-family: var(--mono); }
+
+.cal__actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.btn--primary {
+  background: var(--series-players);
+  border-color: var(--series-players);
+  color: #fff;
+}
+.btn--primary:hover { filter: brightness(1.08); }
+
+.cal__status { font-size: 11px; color: var(--text-2); }
+.cal__status.is-bad { color: var(--status-critical); }
+.cal__status.is-good { color: var(--status-good); }
+
+.cal__rec {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 4px 0; border-top: 1px solid var(--border);
+  font-size: 11.5px;
+}
+.cal__rec .t { font-family: var(--mono); color: var(--text-2); white-space: nowrap; }
+.cal__rec .who { font-weight: 600; }
+.cal__rec .act { color: var(--text-3); }
+/* The error is the reason this panel exists: how far the model's track sits
+   from where the player actually was, at that instant. */
+.cal__rec .err { margin-left: auto; font-family: var(--mono); white-space: nowrap; }
+.cal__rec .err.is-far { color: var(--status-critical); }
+.cal__rec .err.is-mid { color: var(--status-warning); }
+.cal__rec .err.is-near { color: var(--status-good); }
+.cal__rec .err.is-none { color: var(--text-3); }

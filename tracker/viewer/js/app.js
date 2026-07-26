@@ -578,6 +578,11 @@
       $("trackPanel").innerHTML = '<div class="empty">Turn on &ldquo;Player tracks &amp; events&rdquo; to inspect tracks.</div>';
     }
 
+    /* Outside the track branch on purpose: recording where you were is useful
+       whether or not the track layer happens to be switched on, and hiding the
+       cursor stamp behind that toggle left the panel reading "--". */
+    renderCalibration();
+
     renderHeatLegend();
     syncPolitical(false);
     syncRangeInputs();
@@ -712,6 +717,167 @@
   }
 
   /* --------------------------------------------------------------- seeking - */
+
+  /* ------------------------------------------------------- calibration ---- */
+  /* Ground truth: "at this instant this player was exactly HERE". Everything
+     else in the viewer is inferred, so this is the only input that can say
+     whether the inference is any good, and the error column is the point of the
+     panel -- it is the same measure tools/calibrate.js optimises against.
+
+     The instant comes from the CURSOR, never a typed timestamp. You scrub to
+     the moment you remember and type the coordinates off F3; asking for both a
+     time and a position doubles the chance of recording a wrong one, and a
+     calibration record that is wrong is worse than one that is missing because
+     every fit downstream trusts it. */
+
+  var calRecords = [];
+
+  function calLoad() {
+    return fetch("/api/calibration", { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : { records: [] }; })
+      .then(function (j) {
+        calRecords = (j.records || []).map(function (r) {
+          return { ms: M.parseMs(r.time), player: r.player, x: +r.x, y: +r.y, z: +r.z,
+                   activity: r.activity, note: r.note };
+        }).filter(function (r) { return isFinite(r.ms); })
+          .sort(function (a, b) { return a.ms - b.ms; });
+        renderCalibration();
+      })
+      .catch(function () { /* server without the endpoint: panel just stays empty */ });
+  }
+
+  /* How far the model's track for that player sits from where they actually
+     were, interpolated along the track because a record almost never lands on a
+     slice boundary. */
+  function calError(rec) {
+    var tracks = state.tracks || [];
+    for (var i = 0; i < tracks.length; i++) {
+      var tr = tracks[i];
+      if (tr.player !== rec.player) continue;
+      if (rec.ms < tr.startMs - 60000 || rec.ms > tr.lastMs + 60000) continue;
+      var pts = tr.points || [];
+      for (var j = 1; j < pts.length; j++) {
+        if (pts[j - 1].ms <= rec.ms && rec.ms <= pts[j].ms) {
+          var a = pts[j - 1], b = pts[j];
+          var t = (rec.ms - a.ms) / Math.max(1, b.ms - a.ms);
+          return Math.hypot(a.tx + t * (b.tx - a.tx) - rec.x,
+                            a.tz + t * (b.tz - a.tz) - rec.z);
+        }
+      }
+    }
+    return NaN;
+  }
+
+  function renderCalibration() {
+    var when = $("calWhen");
+    if (!when) return;
+    /* transport.cursor, NOT state.cursor -- the latter does not exist, and
+       reading it left the stamp permanently "--" while the submit below built
+       an Invalid Date and could never have recorded anything. */
+    when.textContent = M.fmtStamp(transport.cursor);
+    $("calCount").textContent = calRecords.length ? String(calRecords.length) : "";
+
+    // Offer the names we have actually seen, so a typo cannot invent a player.
+    var dl = $("calPlayers");
+    if (dl && state.model) {
+      var names = {};
+      (state.model.snapshots || []).forEach(function (s) {
+        (s.roster || []).forEach(function (n) { names[n] = 1; });
+      });
+      var want = Object.keys(names).sort().join("|");
+      if (dl.dataset.names !== want) {
+        dl.dataset.names = want;
+        dl.innerHTML = "";
+        Object.keys(names).sort().forEach(function (n) {
+          var o = document.createElement("option"); o.value = n; dl.appendChild(o);
+        });
+      }
+    }
+
+    var list = $("calList");
+    if (!list) return;
+    if (!calRecords.length) {
+      list.innerHTML = '<div class="empty">No ground truth yet. Scrub to a moment you ' +
+        'remember, then record where you were.</div>';
+      return;
+    }
+    var tracksReady = !!(state.tracks && state.tracks.length);
+    /* Tracks are only built for the VISIBLE window, so a record outside it has
+       nothing to be compared against -- and saying "no track" for one would
+       blame the model for a time it was never asked about. Worse, a record just
+       outside can still collide with an unrelated track that happens to overlap
+       the tolerance, which is where a 5270b error came from. */
+    var win = transport.window();
+    var html = "";
+    for (var i = 0; i < calRecords.length; i++) {
+      var r = calRecords[i];
+      var e = (!win || r.ms < win.t0 || r.ms > win.t1) ? NaN : calError(r);
+      /* "tracks off" and "no track" mean different things: one is a view
+         setting, the other is the model failing to place a player it should
+         have. Reporting both as "no track" made a switched-off layer look like
+         a modelling failure. */
+      var cls = !isFinite(e) ? "is-none" : (e < 32 ? "is-near" : (e < 96 ? "is-mid" : "is-far"));
+      var outside = !win || r.ms < win.t0 || r.ms > win.t1;
+      if (outside) { cls = "is-none"; }
+      var txt = outside ? "outside window"
+              : isFinite(e) ? Math.round(e) + "b off"
+              : (tracksReady ? "no track" : "tracks off");
+      html += '<div class="cal__rec">' +
+        '<span class="t">' + P.esc(M.fmtTime(r.ms)) + "</span>" +
+        '<span class="who">' + P.esc(r.player) + "</span>" +
+        '<span class="act">' + P.esc(r.activity) + "</span>" +
+        '<span class="err ' + cls + '">' + txt + "</span>" +
+        "</div>";
+    }
+    list.innerHTML = html;
+  }
+
+  function calSubmit() {
+    var status = $("calStatus");
+    // Checked BEFORE the body is built: new Date(NaN).toISOString() throws, so
+    // a guard placed after it would never be reached.
+    if (!isFinite(transport.cursor)) {
+      status.textContent = "no cursor time yet -- load data first";
+      status.className = "cal__status is-bad";
+      return;
+    }
+    var body = {
+      time: new Date(transport.cursor).toISOString().replace(/\.\d+Z$/, "Z"),
+      player: ($("calPlayer").value || "").trim(),
+      x: parseFloat($("calX").value),
+      y: parseFloat($("calY").value),
+      z: parseFloat($("calZ").value),
+      activity: $("calActivity").value,
+      note: ($("calNote").value || "").trim()
+    };
+    if (!body.player || !isFinite(body.x) || !isFinite(body.y) || !isFinite(body.z)) {
+      status.textContent = "need a player and all three coordinates";
+      status.className = "cal__status is-bad";
+      return;
+    }
+    status.textContent = "saving...";
+    status.className = "cal__status";
+    fetch("/api/calibration", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+    }).then(function (res) {
+      if (!res.ok) {
+        status.textContent = res.j.error || "rejected";
+        status.className = "cal__status is-bad";
+        return;
+      }
+      status.textContent = "recorded";
+      status.className = "cal__status is-good";
+      $("calNote").value = "";
+      return calLoad();
+    }).catch(function (e) {
+      status.textContent = "could not reach the server";
+      status.className = "cal__status is-bad";
+    });
+  }
 
   function seek(ms) {
     var w = transport.window();
@@ -1148,6 +1314,16 @@
       syncPolitical(true);
       saveSettings();
     });
+
+    $("calAdd").addEventListener("click", calSubmit);
+    // Enter anywhere in the form records, so a session can be logged without
+    // reaching for the mouse between points.
+    ["calPlayer", "calX", "calY", "calZ", "calNote"].forEach(function (id) {
+      $(id).addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") { ev.preventDefault(); calSubmit(); }
+      });
+    });
+    calLoad();
 
     $("fitBtn").addEventListener("click", function () { map.fit(); });
     $("fitBtn2").addEventListener("click", function () { map.fit(); });
