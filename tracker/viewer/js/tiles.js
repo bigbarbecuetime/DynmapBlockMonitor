@@ -579,6 +579,18 @@ window.DV = window.DV || {};
 
      Indices come from the sorted roster rather than track order, so a player
      keeps one colour across every track they own and across a rebuild. */
+  /* Shortest distance from a point to a line SEGMENT (not the infinite line):
+     clamping t to [0,1] is what stops a click far past the end of a short
+     segment from registering as a hit on it. */
+  function segDist(px, pz, ax, az, bx, bz) {
+    var dx = bx - ax, dz = bz - az;
+    var len2 = dx * dx + dz * dz;
+    if (len2 < 1e-9) return Math.hypot(px - ax, pz - az);
+    var t = ((px - ax) * dx + (pz - az) * dz) / len2;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    return Math.hypot(px - (ax + t * dx), pz - (az + t * dz));
+  }
+
   var hueIndex = Object.create(null), hueCount = 0;
 
   function registerPlayers(names) {
@@ -668,10 +680,18 @@ window.DV = window.DV || {};
         ctx.arc(last.x, last.y, 4, 0, 6.2832);
         ctx.fill();
         if (tr.player && state.scale >= 1.5) {
+          /* Say WHEN, not just who. Every track whose span overlaps the window
+             is drawn, so an hour-old track sits on the map looking exactly like
+             a live one -- a name alone reads as "this player is here now" and
+             prompted exactly that complaint about someone who had been offline
+             for an hour. The age is measured against the cursor, which is the
+             moment the rest of the view is showing. */
           ctx.font = "10px system-ui, -apple-system, sans-serif";
           ctx.textAlign = "center";
           ctx.fillStyle = pal.text1;
-          ctx.fillText(tr.player, last.x, last.y - 8);
+          var age = state.cursor - tr.lastMs;
+          var label = tr.player + (age > 90000 ? "  · " + M.fmtDur(age) + " ago" : "");
+          ctx.fillText(label, last.x, last.y - 8);
         }
       }
       ctx.restore();
@@ -1187,10 +1207,19 @@ window.DV = window.DV || {};
           var tr = tracks[i];
           if (tr.lastMs < state.t0 || tr.startMs > state.cursor) continue;
           if (filter && (tr.player || "").toLowerCase().indexOf(filter) < 0) continue;
+          /* Hit-test the SEGMENTS, not just the vertices. Points are one per
+             60s slice and neighbours sit hundreds of blocks apart, so testing
+             vertices alone left almost the whole drawn line dead to the pointer
+             -- you could see a track and not be able to click it, which is what
+             "I can only click tiles" was. */
+          var prev = null;
           for (var j = 0; j < tr.points.length; j++) {
-            if (tr.points[j].ms > state.cursor) break;
-            var d = Math.hypot(tr.points[j].tx - wx, tr.points[j].tz - wz);
+            var p = tr.points[j];
+            if (p.ms > state.cursor) break;
+            var d = prev ? segDist(wx, wz, prev.tx, prev.tz, p.tx, p.tz)
+                         : Math.hypot(p.tx - wx, p.tz - wz);
             if (d < tol && d < bestD) { bestD = d; best = tr; }
+            prev = p;
           }
         }
         return best;
