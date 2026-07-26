@@ -31,6 +31,7 @@ import signal
 import socket
 import struct
 import time
+import zlib
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -58,6 +59,15 @@ POLL        = float(_env("POLL_INTERVAL", "10"))
 OUT         = Path(_env("OUT_DIR", "./data"))
 # If saving images or not, since they can be large and take a lot of disk space.
 SAVE_IMAGES = _env("SAVE_IMAGES", "false").lower() in ("1", "true", "yes", "on")
+# Diff each render of the overhead map against the copy we hold, to tell an edit
+# from ambient growth. Set to a map prefix ("flat2"), or empty to switch off.
+# Only the overhead map is worth diffing: its 16 px per block gives a clean 8x8
+# grid of block cells, while the isometric maps smear a block across tiles.
+DIFF_MAP    = _env("DIFF_MAP", "flat2").strip()
+# Ceiling on diffs per poll. A busy minute can queue hundreds of renders and each
+# diff costs two PNG decodes; past this we log the render and skip the picture
+# rather than let the poll loop fall behind.
+DIFF_BUDGET = int(_env("DIFF_BUDGET", "40"))
 # How long to wait for a response from the Dynmap server (seconds)
 TIMEOUT     = float(_env("HTTP_TIMEOUT", "8"))
 
@@ -65,7 +75,12 @@ TIMEOUT     = float(_env("HTTP_TIMEOUT", "8"))
 PLAYERS_LOG = OUT / "players.csv"
 CHUNKS_LOG  = OUT / "chunks.csv"
 WORLD_LOG   = OUT / "world.csv"
+CHANGES_LOG = OUT / "changes.csv"
 CHUNKS_DIR  = OUT / "chunks"
+# One averaged copy of each tile we have seen, so the next render can be diffed
+# against it. Bounded by the number of distinct tiles, not by time: 256 bytes a
+# tile, so even 30k tiles is under 8MB.
+TILE_CACHE  = OUT / "tilecache"
 
 # chunks.csv columns. tile_time/tile_ts/tile are populated only for tile-change rows;
 # event/error rows carry just "time" (when we observed them) and their own column.
@@ -98,6 +113,13 @@ PLAYERS_FIELDS = ["time", "count", "player", "event", "error"]
 # confighash changes when the admin edits the map config, which invalidates the
 # projection matrices the viewer caches.
 WORLD_FIELDS = ["time", "servertime", "storm", "thunder", "dyncount", "confighash"]
+# changes.csv columns. One row per diffed render, joined to chunks.csv on
+# (tile, tile_ts). "kind" is the shape of the change, not a verdict about who
+# caused it -- cells/comps/biggest are kept raw so the classifier can be refitted
+# later without re-collecting. Activity means a player is present OR a
+# chunkloader is holding the area up; both are worth knowing, and which one it is
+# is decided downstream from whether anyone was online, not here.
+CHANGES_FIELDS = ["time", "tile_ts", "tile", "kind", "cells", "comps", "biggest", "was", "now"]
 
 # ---- clock alignment ------------------------------------------------------
 #
@@ -293,6 +315,195 @@ def save_chunk_image(url, name, tile_ts):
     prefix = tile_ts if tile_ts is not None else int(time.time())
     (CHUNKS_DIR / f"{prefix}_{name.replace('/', '_')}").write_bytes(data)
 
+# ---- what actually changed in a tile ---------------------------------------
+#
+# The render-triggers split into two populations that mean completely different
+# things for tracking, and the feed cannot tell them apart:
+#
+#   ambient  leavesdecay, blockspread, blockgrow, structuregrow, blockformed,
+#            blockfaded -- growth, decay, snow and ice. These fire anywhere in
+#            the loaded region, so they locate the DISC (~256 block radius), not
+#            the player. Averaging them is what produces 150 blocks of phantom
+#            motion a minute.
+#   edit     blockplaced, blockbreak, explosion, pistonmoved -- a player doing
+#            something. These locate the PLAYER, to the tile: 8 blocks.
+#
+# The picture separates them. Dynmap only publishes a tile whose image changed,
+# so diffing the new image against the one we already hold shows exactly which
+# blocks moved. At flat2's 16 px per block a 128px tile is an 8x8 grid of block
+# cells, and the shape of the changed set is the signal:
+#
+#   one lone cell                  a leaf going, a grass block spreading
+#   two or more cells touching     something placed or mined in a run
+#   many scattered cells at once   weather settling over the whole tile
+#
+# We record the shape rather than a verdict. The thresholds below are a first
+# reading and want re-fitting once there is labelled data; the raw counts stay
+# in the log so that can happen without re-collecting.
+BLOCK_PX = 16   # flat2 renders 16 px per block; 128px tile = 8x8 block cells
+
+def _png_cells(data):
+    """Decode a PNG into an 8x8 grid of averaged block-cell colours.
+
+    Returns None for anything we cannot read (JPEG maps, truncated fetches).
+    Averaging each 16x16 cell rather than keeping every pixel makes the compare
+    robust to the map's dithering and keeps the cache small.
+    """
+    if not data[:8] == b"\x89PNG\r\n\x1a\n":
+        return None
+    pos, idat, w, h, bd, ct, plte, trns = 8, [], None, None, None, None, None, None
+    while pos + 8 <= len(data):
+        ln = int.from_bytes(data[pos:pos + 4], "big")
+        typ = data[pos + 4:pos + 8]
+        chunk = data[pos + 8:pos + 8 + ln]
+        if typ == b"IHDR":
+            w, h, bd, ct = int.from_bytes(chunk[0:4], "big"), int.from_bytes(chunk[4:8], "big"), chunk[8], chunk[9]
+        elif typ == b"IDAT":
+            idat.append(chunk)
+        elif typ == b"PLTE":
+            plte = chunk
+        elif typ == b"tRNS":
+            trns = chunk
+        elif typ == b"IEND":
+            break
+        pos += 12 + ln
+    if not idat or not w or bd != 8:
+        return None
+    try:
+        raw = zlib.decompress(b"".join(idat))
+    except Exception:
+        return None
+    ch = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ct)
+    if not ch:
+        return None
+    bpp, stride = ch, w * ch
+    if len(raw) < (stride + 1) * h:
+        return None
+    # Undo the per-scanline filters in place; this is the only hot loop here.
+    out = bytearray(stride * h)
+    prev = bytearray(stride)
+    p = 0
+    for y in range(h):
+        f = raw[p]; p += 1
+        line = bytearray(raw[p:p + stride]); p += stride
+        if f == 1:
+            for i in range(bpp, stride): line[i] = (line[i] + line[i - bpp]) & 255
+        elif f == 2:
+            for i in range(stride): line[i] = (line[i] + prev[i]) & 255
+        elif f == 3:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 255
+        elif f == 4:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                c = prev[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 255
+        out[y * stride:(y + 1) * stride] = line
+        prev = line
+    n = max(1, w // BLOCK_PX)
+    cells = []
+    for cy in range(n):
+        for cx in range(n):
+            r = g = b = a = cnt = 0
+            for y in range(cy * BLOCK_PX, min(h, (cy + 1) * BLOCK_PX)):
+                base = y * stride
+                for x in range(cx * BLOCK_PX, min(w, (cx + 1) * BLOCK_PX)):
+                    if ct == 3:
+                        idx = out[base + x]
+                        if plte and idx * 3 + 2 < len(plte):
+                            r += plte[idx * 3]; g += plte[idx * 3 + 1]; b += plte[idx * 3 + 2]
+                        a += trns[idx] if (trns and idx < len(trns)) else 255
+                    else:
+                        o = base + x * ch
+                        r += out[o]; g += out[o + 1] if ch >= 3 else out[o]
+                        b += out[o + 2] if ch >= 3 else out[o]
+                        a += out[o + ch - 1] if ch in (2, 4) else 255
+                    cnt += 1
+            cells.append((r // cnt, g // cnt, b // cnt, a // cnt))
+    return (n, cells)
+
+def _components(changed, n):
+    """Largest touching run, and how many separate runs, among changed cells."""
+    seen, comps, biggest = set(), 0, 0
+    for start in changed:
+        if start in seen:
+            continue
+        comps += 1
+        stack, size = [start], 0
+        seen.add(start)
+        while stack:
+            i = stack.pop(); size += 1
+            cx, cy = i % n, i // n
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = cx + dx, cy + dy
+                j = ny * n + nx
+                if 0 <= nx < n and 0 <= ny < n and j in changed and j not in seen:
+                    seen.add(j); stack.append(j)
+        biggest = max(biggest, size)
+    return comps, biggest
+
+def diff_tile(url, name, tile_ts):
+    """Fetch a tile, compare against the copy we hold, and log what moved."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "dynmap-tracker"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            data = r.read()
+    except Exception:
+        return
+    TILE_CACHE.mkdir(parents=True, exist_ok=True)
+    cache = TILE_CACHE / (name.replace("/", "_") + ".bin")
+    cur = _png_cells(data)
+    if cur is None:
+        return
+    n, cells = cur
+    prev_cells = None
+    if cache.exists():
+        try:
+            blob = cache.read_bytes()
+            if len(blob) == n * n * 4:
+                prev_cells = [tuple(blob[i:i + 4]) for i in range(0, len(blob), 4)]
+        except Exception:
+            prev_cells = None
+    cache.write_bytes(bytes(v for c in cells for v in c))
+    if prev_cells is None:
+        # Nothing to compare against yet -- this render still happened, so say so
+        # rather than silently dropping it.
+        append_csv(CHANGES_LOG, CHANGES_FIELDS, {
+            "time": now(), "tile_ts": tile_ts, "tile": url, "kind": "first-sight",
+            "cells": "", "comps": "", "biggest": "", "was": "", "now": ""})
+        return
+    changed = set()
+    for i in range(min(len(cells), len(prev_cells))):
+        pa, pb = prev_cells[i], cells[i]
+        # Dithering makes exact equality too strict; 12/255 per channel is well
+        # under the gap between any two distinct Minecraft block colours.
+        if abs(pa[0] - pb[0]) + abs(pa[1] - pb[1]) + abs(pa[2] - pb[2]) > 36 or abs(pa[3] - pb[3]) > 64:
+            changed.add(i)
+    if not changed:
+        return
+    comps, biggest = _components(changed, n)
+    total = n * n
+    if len(changed) >= total * 0.5:
+        kind = "sweep"          # whole tile redrawn: weather, lighting, a re-render
+    elif biggest >= 2 and len(changed) <= 12:
+        kind = "run"            # touching cells -- placed or mined together
+    elif len(changed) == 1:
+        kind = "single"         # one cell: decay, spread, a lone block
+    elif comps >= 4 and biggest == 1:
+        kind = "scattered"      # many lone cells at once: settling over the tile
+    else:
+        kind = "patch"
+    i0 = sorted(changed)[0]
+    append_csv(CHANGES_LOG, CHANGES_FIELDS, {
+        "time": now(), "tile_ts": tile_ts, "tile": url, "kind": kind,
+        "cells": len(changed), "comps": comps, "biggest": biggest,
+        "was": "%02x%02x%02x" % prev_cells[i0][:3], "now": "%02x%02x%02x" % cells[i0][:3],
+    })
+
 # ---- Minecraft Server List Ping (status) -- pure stdlib, no plugin needed ----
 
 def _pack_varint(value):
@@ -423,6 +634,7 @@ def main():
             try:
                 data = fetch_json(url_base + str(last_ts))
                 record_world(data)
+                diffs_left = DIFF_BUDGET
 
                 for u in data.get("updates", []):
                     if u.get("type") != "tile":
@@ -442,6 +654,9 @@ def main():
                     })
                     if SAVE_IMAGES:
                         save_chunk_image(tile_url, name, tile_ts)
+                    if DIFF_MAP and name.startswith(DIFF_MAP + "/") and diffs_left > 0:
+                        diffs_left -= 1
+                        diff_tile(tile_url, name, tile_ts)
 
                 last_ts = data.get("timestamp", last_ts)  # advance the poll cursor
 
