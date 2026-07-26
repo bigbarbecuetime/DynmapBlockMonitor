@@ -620,9 +620,16 @@ window.DV = window.DV || {};
     /* Binary search, not a scan: this is called once per lifecycle event, and a
        long-lived file with many tracker restarts would otherwise be O(restarts x
        rows) on every rebuild -- 100 restarts over 65k rows is 6.5M steps a poll. */
+    /* STRICTLY before, and that strictness is the whole point. Both callers are
+       retro-closing a dead run using a marker that the NEXT run wrote, and the
+       next run's first poll lands on the very same second as its own marker --
+       a restart logged "closed without warning" at 18:43:49 and recorded its
+       first tiles at 18:43:49. With <=, the dead run swallowed that tile and
+       closed at the restart instant instead of at its last real sample, hiding a
+       15.7h outage as covered time. */
     function lastDataBefore(ms) {
       var lo = 0, hi = dataMs.length;
-      while (lo < hi) { var mid = (lo + hi) >> 1; if (dataMs[mid] <= ms) lo = mid + 1; else hi = mid; }
+      while (lo < hi) { var mid = (lo + hi) >> 1; if (dataMs[mid] < ms) lo = mid + 1; else hi = mid; }
       return lo > 0 ? dataMs[lo - 1] : NaN;
     }
     for (i = 0; i < events.length; i++) {
