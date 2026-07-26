@@ -472,22 +472,31 @@ window.DV = window.DV || {};
        or double digits at every zoom. */
     function politicalLod(pol, bpt) {
       var maxLod = pol.maxLod === undefined ? 4 : pol.maxLod;
+      /* Measure the projection rather than assuming state.scale is screen pixels
+         per grid unit -- that only holds overhead. The isometric matrix magnifies
+         by 11.31 where flat2 uses 16, so the same overlay tile lands about 30%
+         smaller and the wrong LOD would be chosen. */
+      var o = projGrid(0, 0), ux = projGrid(1, 0);
+      var pxPerGrid = Math.hypot(ux.x - o.x, ux.y - o.y) || state.scale;
       // Aim for tiles at least ~256px on screen; smaller means we are fetching
       // far more of them than the detail is worth.
       var lod = 0;
-      while (lod < maxLod && (512 * Math.pow(2, lod) / bpt) * state.scale < 256) lod++;
+      while (lod < maxLod && (512 * Math.pow(2, lod) / bpt) * pxPerGrid < 256) lod++;
       return lod;
     }
 
     function drawPolitical() {
       var pol = state.political;
-      if (!pol || !pol.date || !isFlatProjection()) return;
+      if (!pol || !pol.date) return;
       var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
       var lod = politicalLod(pol, bpt);
       var gridPerTile = (512 * Math.pow(2, lod)) / bpt;   // grid units per tile at this lod
-      var a = toGrid(0, 0), b = toGrid(state.w, state.h);
-      var x0 = Math.floor(a.gx / gridPerTile), x1 = Math.ceil(b.gx / gridPerTile);
-      var z0 = Math.floor(a.gy / gridPerTile), z1 = Math.ceil(b.gy / gridPerTile);
+      /* Range comes from the projected corners, not the screen rectangle: on a
+         skewed map the visible world is a rotated quad, and reading only two
+         opposite corners left the overlay clipped along the diagonals. */
+      var box = visibleGridBox();
+      var x0 = Math.floor(box.x0 / gridPerTile), x1 = Math.ceil(box.x1 / gridPerTile);
+      var z0 = Math.floor(box.y0 / gridPerTile), z1 = Math.ceil(box.y1 / gridPerTile);
       ctx.globalAlpha = pol.opacity === undefined ? 0.55 : pol.opacity;
       ctx.imageSmoothingEnabled = true;
       politicalDrawn = 0;
@@ -508,10 +517,8 @@ window.DV = window.DV || {};
           }
           var e = getImage(pol.base + "/" + name);
           if (!e.ok || !e.img) continue;
-          var p0 = toScreen(tx * gridPerTile, tz * gridPerTile);
-          var p1 = toScreen((tx + 1) * gridPerTile, (tz + 1) * gridPerTile);
-          // +1 closes the sub-pixel seam between neighbouring tiles.
-          ctx.drawImage(e.img, p0.x, p0.y, p1.x - p0.x + 1, p1.y - p0.y + 1);
+          drawWarped(e.img, tx * gridPerTile, tz * gridPerTile,
+                            (tx + 1) * gridPerTile, (tz + 1) * gridPerTile);
           politicalDrawn++;
         }
       }
@@ -754,6 +761,71 @@ window.DV = window.DV || {};
       var mx = a[0] * wx + a[1] * y + a[2] * wz;
       var my = a[3] * wx + a[4] * y + a[5] * wz;
       return toScreen(mx / size, -my / size);
+    }
+
+    /* Grid units through the active projection. The overlays were written in
+       grid units against toScreen, which is only correct while the map is
+       overhead; this is the same thing routed through worldtomap, and it
+       collapses back to toScreen exactly when the projection is flat (grid
+       (gx,gy) is world (gx*bpt, gy*bpt), and flat2's 16 px per block over a
+       128px tile gives mx/size = gx, -my/size = gy). */
+    function projGrid(gx, gy) {
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      return worldToScreen(gx * bpt, gy * bpt, 64);
+    }
+
+    /* Inverse of projGrid at the same nominal height. Needed because on a
+       skewed map the visible world region is a rotated quad, so the range of
+       overlay tiles to draw cannot be read off the screen corners directly. */
+    function screenToGrid(px, py) {
+      var cfg = state.mapCfg;
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      if (!cfg || !cfg.worldtomap) return toGrid(px, py);
+      var a = cfg.worldtomap, size = 128 << (parseInt(cfg.tilescale, 10) || 0);
+      var g = toGrid(px, py);
+      var mx = g.gx * size, my = -g.gy * size, y = 64;
+      var det = a[0] * a[5] - a[2] * a[3];
+      if (Math.abs(det) < 1e-12) return toGrid(px, py);
+      var u = mx - a[1] * y, v = my - a[4] * y;
+      return { gx: (u * a[5] - v * a[2]) / det / bpt,
+               gy: (a[0] * v - a[3] * u) / det / bpt };
+    }
+
+    /* Grid-space bounding box of everything currently on screen. On a flat map
+       this is just the two opposite corners; on a skewed one all four matter,
+       because the quad's extremes are not its diagonal. */
+    function visibleGridBox() {
+      var pts = [screenToGrid(0, 0), screenToGrid(state.w, 0),
+                 screenToGrid(0, state.h), screenToGrid(state.w, state.h)];
+      var b = { x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity };
+      for (var i = 0; i < pts.length; i++) {
+        if (pts[i].gx < b.x0) b.x0 = pts[i].gx;
+        if (pts[i].gx > b.x1) b.x1 = pts[i].gx;
+        if (pts[i].gy < b.y0) b.y0 = pts[i].gy;
+        if (pts[i].gy > b.y1) b.y1 = pts[i].gy;
+      }
+      return b;
+    }
+
+    /* Paint an axis-aligned grid-space rectangle of image through the
+       projection. The map matrix is linear in x and z at a fixed height, so the
+       rectangle lands as a PARALLELOGRAM -- which canvas can draw directly by
+       composing the transform, rather than us slicing the bitmap up. Columns of
+       the matrix are the screen steps per image pixel along u and v. */
+    function drawWarped(img, gx0, gy0, gx1, gy1) {
+      var p00 = projGrid(gx0, gy0), p10 = projGrid(gx1, gy0), p01 = projGrid(gx0, gy1);
+      var iw = img.naturalWidth || img.width || 1;
+      var ih = img.naturalHeight || img.height || 1;
+      // Overdraw by about one screen pixel so neighbours do not show a seam.
+      var wpx = Math.hypot(p10.x - p00.x, p10.y - p00.y) || 1;
+      var hpx = Math.hypot(p01.x - p00.x, p01.y - p00.y) || 1;
+      var ou = 1 + 1 / wpx, ov = 1 + 1 / hpx;
+      ctx.save();
+      ctx.transform((p10.x - p00.x) / iw, (p10.y - p00.y) / iw,
+                    (p01.x - p00.x) / ih, (p01.y - p00.y) / ih,
+                    p00.x, p00.y);
+      ctx.drawImage(img, 0, 0, iw * ou, ih * ov);
+      ctx.restore();
     }
 
     /* Is the selected map a straight overhead view? Isometric maps fold height
