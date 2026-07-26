@@ -199,19 +199,27 @@ Each player keeps **one colour across all their tracks**, so separate visits to
 the same place are legible as the same person; unattributed tracks share a muted
 slot. Click a track for its details and events, and filter to one player by name.
 
-**A re-render does not mean a block changed.** Tiles were diffed live as they
-re-rendered and every one came back byte-identical — same picture, new
-timestamp. The trigger is a block changing anywhere in a chunk that happens to
-be *loaded*, and under a forest canopy the top-down map sees leaves either way.
-Loading is player-driven; changing is mob- and terrain-driven. So renders pile
-up wherever tickable terrain sits inside the loaded disc and stop dead where it
-does not.
+**A render means the map image changed, and nothing else.** Dynmap pushes a
+client update only inside `if (mtile.matchesHashCode(crc) == false)`
+(`IsoHDPerspective.java`), so an unchanged re-render is never announced. What
+triggers one is a configured render-trigger; the default set in
+`configuration.txt` is blockplaced, blockbreak, leavesdecay, blockburn,
+chunkgenerated, blockformed, blockfaded, blockspread, pistonmoved, explosion,
+structuregrow and blockgrow. **There is no chunkload trigger** — `playermove`
+and `playerjoin` exist but ship commented out — which is why terrain a player
+merely walks over never renders.
+
+Block events only fire in loaded chunks, so a player's contribution is to hold
+chunks loaded; what changes inside them is mob- and terrain-driven. Renders
+therefore pile up wherever something growing or decaying sits inside the loaded
+disc, and stop dead where nothing does.
 
 That is why the position estimate is the **centre of the extent** the renders
 cover, not their centre of mass. A calibration session (standing at a known
 spot, then a 52-block sprint, then a 64-block walk) sat beside a dark-oak forest
-to the north; the open stone the player actually stood on has not re-rendered
-since January. Averaging the renders walks the estimate into the forest —
+to the north, where `structuregrow`, `blockgrow` and `leavesdecay` keep altering
+the canopy the flat map looks straight down on; the open stone the player
+actually stood on grows nothing and has not re-rendered since January. Averaging the renders walks the estimate into the forest —
 102/112/143 blocks off the three known positions — while the extent centre gives
 63/64/101, landing X within 2 blocks twice. Trimming the extent to 5–95% is
 worse (106), because the extreme points are exactly what pin the disc edge.

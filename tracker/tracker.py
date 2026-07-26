@@ -64,6 +64,7 @@ TIMEOUT     = float(_env("HTTP_TIMEOUT", "8"))
 # Name of the log files and directories
 PLAYERS_LOG = OUT / "players.csv"
 CHUNKS_LOG  = OUT / "chunks.csv"
+WORLD_LOG   = OUT / "world.csv"
 CHUNKS_DIR  = OUT / "chunks"
 
 # chunks.csv columns. tile_time/tile_ts/tile are populated only for tile-change rows;
@@ -73,6 +74,30 @@ CHUNK_FIELDS = ["time", "tile_time", "tile_ts", "tile", "event", "error"]
 # online player, or one blank-player row when count is 0); event/error rows carry just
 # "time" and their own column.
 PLAYERS_FIELDS = ["time", "count", "player", "event", "error"]
+# world.csv columns. The update feed carries four fields next to "updates" that we
+# were throwing away, and they are the context for why tiles render at all.
+#
+# Dynmap only re-renders a tile when the rendered image actually CHANGES -- see
+# IsoHDPerspective.java, which pushes a client update solely inside
+# `if (mtile.matchesHashCode(crc) == false)`. So every logged tile is a real
+# visual change, driven by one of the configured render-triggers. The default
+# set (configuration.txt) is blockplaced, blockbreak, leavesdecay, blockburn,
+# chunkgenerated, blockformed, blockfaded, blockspread, pistonmoved, explosion,
+# structuregrow and blockgrow -- note there is NO chunkload trigger, which is
+# why terrain a player merely walks over never renders.
+#
+# Of those, blockformed and blockfaded are snow settling and ice freezing or
+# thawing: they fire across every loaded cold chunk while it is raining, and
+# stop when it clears. storm/thunder therefore set the ambient render rate, and
+# servertime does the same through night-time mob activity. Recording them lets
+# the model tell weather-driven noise from a player actually doing something.
+#
+# dyncount is Dynmap's own player count, which is (real count - hidden players):
+# this server hides everyone, so it reads 0 while the game server reports three.
+# Differencing it against the SLP count gives the hidden headcount for free.
+# confighash changes when the admin edits the map config, which invalidates the
+# projection matrices the viewer caches.
+WORLD_FIELDS = ["time", "servertime", "storm", "thunder", "dyncount", "confighash"]
 
 # ---- clock alignment ------------------------------------------------------
 #
@@ -190,6 +215,39 @@ def append_csv(path, fieldnames, row):
 
 def append_chunk(row):
     append_csv(CHUNKS_LOG, CHUNK_FIELDS, row)
+
+_world_state = None
+
+def record_world(data):
+    """Log the feed's world state, but only when it actually moves.
+
+    servertime is a tick-of-day counter that changes every single poll, so
+    logging it raw would write a row every 10s forever. What the model cares
+    about is the day/night phase (mobs spawn, and with them the block events
+    that drive ambient renders), so quantize to Minecraft's own boundaries --
+    13000 ticks is dusk, 23000 is dawn -- and let storm, thunder, the hidden
+    headcount and the config hash trigger a row on any change.
+    """
+    global _world_state
+    if "servertime" not in data and "hasStorm" not in data:
+        return
+    st = data.get("servertime")
+    phase = None
+    if isinstance(st, (int, float)):
+        phase = "night" if 13000 <= st < 23000 else "day"
+    key = (phase, bool(data.get("hasStorm")), bool(data.get("isThundering")),
+           data.get("currentcount"), data.get("confighash"))
+    if key == _world_state:
+        return
+    _world_state = key
+    append_csv(WORLD_LOG, WORLD_FIELDS, {
+        "time": now(),
+        "servertime": st if st is not None else "",
+        "storm": "1" if data.get("hasStorm") else "0",
+        "thunder": "1" if data.get("isThundering") else "0",
+        "dyncount": data.get("currentcount", ""),
+        "confighash": data.get("confighash", ""),
+    })
 
 def record_players(count, players):
     # One row per online player, all sharing the same capture time -- normalized so a
@@ -364,6 +422,7 @@ def main():
             # ---- chunk (map tile) changes from Dynmap ----
             try:
                 data = fetch_json(url_base + str(last_ts))
+                record_world(data)
 
                 for u in data.get("updates", []):
                     if u.get("type") != "tile":

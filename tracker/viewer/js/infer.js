@@ -351,13 +351,17 @@ window.DV = window.DV || {};
         var grp = groups[g];
         /* Centre of the EXTENT, not of the density.
 
-           A re-render does not mean "a player was here". Diffing tiles live as
-           they re-rendered showed every one byte-identical: the picture never
-           changed, only the timestamp. So the trigger is a block changing in a
-           chunk that happens to be LOADED -- and under a forest canopy the flat
-           map sees leaves either way. Loading is player-driven, but changing is
-           mob- and terrain-driven, so renders pile up wherever tickable terrain
-           sits inside the loaded disc and stop dead where it does not.
+           A render does not mean "a player was here". Dynmap announces a tile
+           only when its image actually changed -- IsoHDPerspective.java pushes
+           the client update inside `if (mtile.matchesHashCode(crc) == false)`
+           -- and what triggers a render is a block event, never a chunk load:
+           the shipped render-triggers are blockplaced, blockbreak, leavesdecay,
+           blockburn, chunkgenerated, blockformed, blockfaded, blockspread,
+           pistonmoved, explosion, structuregrow and blockgrow. Block events only
+           fire in LOADED chunks, so the player's part is holding chunks loaded
+           while mobs and growth decide what changes inside them. Renders pile up
+           wherever something grows or decays inside the loaded disc and stop
+           dead where nothing does.
 
            At the calibration spot that terrain was a dark-oak forest to the
            north; the open stone the player actually stood on has not re-rendered
