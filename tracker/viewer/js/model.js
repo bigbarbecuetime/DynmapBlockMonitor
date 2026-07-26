@@ -258,9 +258,31 @@ window.DV = window.DV || {};
        readout wrong for whichever type doesn't match blocksPerTile. So the grid is
        always ONE map type, and everything downstream may safely key on (tx,tz).
        Default to whichever type has the most rows. */
+    /* Choosing the default: OVERHEAD FIRST, then volume.
+
+       Picking simply the most-logged type was wrong and quietly broke everything
+       downstream. Once the tracker began logging every map, the isometric "t"
+       overtook "flat2" on count (27,080 to 15,690 -- one chunk load crosses
+       several isometric tiles), so the model silently switched its whole
+       coordinate frame to a skewed projection while the heatmap, the tile/world
+       readout and the tracks all still assumed an overhead one. Positions were
+       nonsense and nothing announced it.
+
+       An overhead map is the only kind whose tile grid maps linearly onto world
+       X/Z, which is what every position calculation here needs, so prefer one
+       whenever the projections are known. */
     var mapTypes = Array.from(mapCounts.entries())
-      .map(function (e) { return { map: e[0], count: e[1] }; })
-      .sort(function (a, b) { return b.count - a.count || (a.map < b.map ? -1 : 1); });
+      .map(function (e) {
+        var cfg = opts.mapConfigs ? opts.mapConfigs[e[0]] : null;
+        var overhead = cfg && cfg.worldtomap ? Math.abs(cfg.worldtomap[4]) < 1e-9 : null;
+        return { map: e[0], count: e[1], overhead: overhead };
+      })
+      .sort(function (a, b) {
+        // known-overhead beats unknown beats known-skewed; then by volume
+        var ra = a.overhead === true ? 0 : (a.overhead === null ? 1 : 2);
+        var rb = b.overhead === true ? 0 : (b.overhead === null ? 1 : 2);
+        return ra - rb || b.count - a.count || (a.map < b.map ? -1 : 1);
+      });
     var mapType = opts.mapType && mapCounts.has(opts.mapType) ? opts.mapType
                 : (mapTypes.length ? mapTypes[0].map : "");
     var rawTiles = mapTypes.length > 1
@@ -326,7 +348,97 @@ window.DV = window.DV || {};
     });
     var skewMs = (opts.skewMs === null || opts.skewMs === undefined) ? estimated : opts.skewMs;
 
+    /* ==========================================================================
+       RENDER-QUEUE DELAY
+       --------------------------------------------------------------------------
+       tile_ts is when Dynmap FINISHED REDRAWING a tile, which is not when the
+       player caused the chunk to load. Dynmap queues dirty tiles and works
+       through them, and on this server that queue runs well over a minute deep.
+       Measured three independent ways over 67h of log:
+
+         * 130 flat2 tiles are stamped while NOBODY was online, 98% of them
+           within 120s of the last player leaving (median 42s). Nothing was there
+           to cause them; they are the queue draining.
+         * Sessions with enough tiles to measure: the first tile lands a median
+           of 66s after the join (p25 41s, p75 95s).
+         * The calibration session's own cluster starts at join +51s and ends at
+           leave +84s -- late at BOTH ends by a similar amount, which is the
+           signature of a pipeline delay rather than a clock offset.
+
+       Estimated here by asking which backward shift best explains tile activity
+       by player presence: sweeping the shift, the fraction of tiles landing
+       inside an occupied interval peaks at 99.75% at -73s, against 99.1%
+       unshifted. That is the number applied.
+
+       This is a MEDIAN, and the spread is real (41-95s between quartiles), so it
+       fixes alignment, not jitter. Without it every track is dragged about a
+       minute past the session that produced it -- which is how tracks were being
+       created in windows with nobody online, and therefore no name.
+       ======================================================================== */
+    function estimateRenderDelay(rawList, occupied) {
+      if (!rawList.length || !occupied.length) return 0;
+      var startsArr = occupied.map(function (o) { return o[0]; });
+      function inside(t) {
+        var lo = 0, hi = startsArr.length;
+        while (lo < hi) { var mid = (lo + hi) >> 1; if (startsArr[mid] <= t) lo = mid + 1; else hi = mid; }
+        var i = lo - 1;
+        return i >= 0 && t >= occupied[i][0] && t < occupied[i][1];
+      }
+      /* Objective: the fewest tiles left attributable to NOBODY. That is exactly
+         the symptom being fixed -- a tile stamped when the server was empty
+         cannot have been caused by a player, so the shift that empties that
+         bucket is the shift that aligns cause with effect.
+
+         Scored over every tile, not just those near a session edge. It is
+         tempting to score only the edges, since a long session's interior is
+         inside the window at any shift and contributes nothing -- but an edge
+         window also sweeps in the busy first minutes of long sessions, which
+         pull one-sidedly and dragged the estimate to 162s against a true peak
+         near 70s. Interior tiles are merely insensitive, not misleading. */
+      var best = 0, bestHit = -1;
+      for (var d = 0; d <= 180000; d += 1000) {
+        var hit = 0;
+        for (var k = 0; k < rawList.length; k++) if (inside(rawList[k] - d)) hit++;
+        if (hit > bestHit) { bestHit = hit; best = d; }
+      }
+      return best;
+    }
+
+    /* Intervals during which at least one player was online, from the snapshots.
+       Built before the tiles are placed on the timeline, because the tiles are
+       about to be aligned TO it. */
+    function occupiedIntervals(snaps) {
+      var out = [];
+      for (var i = 0; i < snaps.length - 1; i++) {
+        if (snaps[i].count > 0) {
+          if (out.length && snaps[i].ms - out[out.length - 1][1] < 1000) out[out.length - 1][1] = snaps[i + 1].ms;
+          else out.push([snaps[i].ms, snaps[i + 1].ms]);
+        }
+      }
+      return out;
+    }
+
     /* ---- tiles on the corrected (host) timebase ------------------------ */
+    /* Occupancy, read straight off the player rows -- needed BEFORE the tiles are
+       placed on the timeline, because they are about to be aligned to it. A light
+       scan rather than the full snapshot build, which happens further down. */
+    var occSnaps = [], occSeen = new Map();
+    for (i = 0; i < playerRows.length; i++) {
+      var pr = playerRows[i];
+      if (pr.event || pr.error || pr.count === "" || pr.count === undefined) continue;
+      var pms2 = parseMs(pr.time);
+      if (!occSeen.has(pms2)) { occSeen.set(pms2, true); occSnaps.push({ ms: pms2, count: parseInt(pr.count, 10) || 0 }); }
+    }
+    occSnaps.sort(function (a, b) { return a.ms - b.ms; });
+    var occupied = occupiedIntervals(occSnaps);
+
+    var rawTileMsList = [];
+    for (i = 0; i < rawTiles.length; i++) rawTileMsList.push(rawTiles[i].rawTileMs - skewMs);
+    rawTileMsList.sort(function (a, b) { return a - b; });
+    var renderDelayMs = opts.renderDelayMs === undefined
+      ? estimateRenderDelay(rawTileMsList, occupied)
+      : opts.renderDelayMs;
+
     var tiles = [];
     var manual = (opts.skewMs !== null && opts.skewMs !== undefined);
     for (i = 0; i < rawTiles.length; i++) {
@@ -335,8 +447,12 @@ window.DV = window.DV || {};
       // by the offset its own tracker run was written with.
       var use = manual ? skewMs : (runSkew.has(runOf(t.capMs)) ? runSkew.get(runOf(t.capMs)) : estimated);
       t.skewMs = use;
-      t.tileMs = t.rawTileMs - use;
-      t.lagMs = t.capMs - t.tileMs;      // render -> observed delay, host clock
+      t.renderMs = t.rawTileMs - use;    // when Dynmap finished drawing it
+      t.lagMs = t.capMs - t.renderMs;    // render -> observed, the polling delay
+      /* The timeline position is when the chunk was LOADED, which is the render
+         time less the queue depth -- that is the moment a player was there, and
+         the only one worth correlating against player activity. */
+      t.tileMs = t.renderMs - renderDelayMs;
       tiles.push(t);
     }
     tiles.sort(function (a, b) { return a.tileMs - b.tileMs || a.capMs - b.capMs; });
@@ -675,6 +791,7 @@ window.DV = window.DV || {};
       // every map type, unfiltered -- infer.js needs the isometric ones for height
       allTiles: allTiles,
       pollMs: pollMs, playerPollMs: playerPollMs, playerChangeMs: playerChangeMs,
+      renderDelayMs: renderDelayMs, occupied: occupied,
       skew: { ms: skewMs, estimatedMs: estimated, overridden: manual,
               perRun: Array.from(runSkew.entries()).map(function (e) { return { run: e[0], ms: e[1] }; }),
               samples: diffs.length, rawMinMs: diffs.length ? diffs[0] : 0,

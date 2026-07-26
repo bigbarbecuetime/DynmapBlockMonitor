@@ -26,7 +26,7 @@
     dataBase: "../data",
     mapType: null,           // null = let the model pick the most-logged type
     mapConfigs: null,        // per-map projection matrices, for height inference
-    tracks: null, trackScore: null, trackEvents: null,
+    tracks: null, trackScore: null, trackEvents: null, selectedTrackId: null,
     portals: null, highways: null,
     politicalOn: false, politicalDate: '', politicalDates: null, politicalTiles: {},
     parseCache: {},          // memoised row parse, reused across rebuilds
@@ -51,6 +51,7 @@
         fillContext: map.get("fillContext"), showGrid: map.get("showGrid"), showRuler: map.get("showRuler"),
         showMarkers: map.get("showMarkers"), tileKinds: map.get("tileKinds"),
         showPortals: map.get("showPortals"), showTracks: map.get("showTracks"), politicalOn: !!state.politicalOn,
+        trackFilter: map.get("trackFilter"),
         skewOverride: state.skewOverride, blocksPerTile: state.blocksPerTile, mapType: state.mapType,
         corrWindowMs: state.corrWindowMs, dataBase: state.dataBase, livePollMs: state.livePollMs,
         theme: document.documentElement.getAttribute("data-theme") || "",
@@ -90,6 +91,9 @@
       skewMs: state.skewOverride,
       blocksPerTile: state.blocksPerTile,
       mapType: state.mapType,
+      // Lets the model prefer an OVERHEAD projection as its frame rather than
+      // whichever map merely logged the most tiles.
+      mapConfigs: state.mapConfigs,
       /* Reused across rebuilds so a live poll only parses the rows that arrived,
          instead of re-running a regex and a URL split over every row in the file.
          Safe because the row arrays are appended to in place -- see the PARSE
@@ -555,6 +559,25 @@
       P.renderTileDetail($("tilePanel"), info, m, c, seek);
     }
 
+    if (map.get("showTracks")) {
+      $("trackFilterRow").hidden = false;
+      var names = {};
+      (state.tracks || []).forEach(function (t) { if (t.player) names[t.player] = 1; });
+      var dl = $("trackPlayers"), want = Object.keys(names).sort().join("|");
+      if (dl.dataset.names !== want) {
+        dl.dataset.names = want;
+        dl.innerHTML = "";
+        Object.keys(names).sort().forEach(function (n) {
+          var o = document.createElement("option"); o.value = n; dl.appendChild(o);
+        });
+      }
+      var sel = (state.tracks || []).filter(function (t) { return t.id === state.selectedTrackId; })[0];
+      P.renderTrackDetail($("trackPanel"), sel, state.trackEvents, m, sel ? map.trackHue(sel) : null, seek);
+    } else {
+      $("trackFilterRow").hidden = true;
+      $("trackPanel").innerHTML = '<div class="empty">Turn on &ldquo;Player tracks &amp; events&rdquo; to inspect tracks.</div>';
+    }
+
     renderHeatLegend();
     syncPolitical(false);
     syncRangeInputs();
@@ -808,6 +831,11 @@
         showTip($("mapTip"), $("stage"), tileTipHtml(info), cx, cy);
       },
       onSelect: selectTile,
+      onTrackSelect: function (tr) {
+        state.selectedTrackId = tr.id;
+        $("trackGroup").open = true;
+        P.renderTrackDetail($("trackPanel"), tr, state.trackEvents, state.model, map.trackHue(tr), seek);
+      },
       onView: function () { updateBadge(); }
     });
 
@@ -857,7 +885,8 @@
       showMarkers: s.showMarkers !== false,
       tileKinds: s.tileKinds || "all",
       showPortals: !!s.showPortals,
-      showTracks: !!s.showTracks
+      showTracks: !!s.showTracks,
+      trackFilter: s.trackFilter || ""
     });
     if (typeof s.speedIdx === "number") transport.setSpeedIndex(s.speedIdx);
     if (s.loop === false) transport.setLoop(false);
@@ -957,6 +986,7 @@
     $("showPortals").checked = map.get("showPortals");
     $("showPolitical").checked = !!state.politicalOn;
     $("showTracks").checked = map.get("showTracks");
+    $("trackFilter").value = map.get("trackFilter") || "";
     $("halfLife").value = Math.round(map.get("halfLifeMs") / 1000);
     $("halfLifeVal").textContent = M.fmtDur(map.get("halfLifeMs"));
     $("halfLifeRow").hidden = map.get("heatMetric") !== "recency";
@@ -1104,6 +1134,10 @@
     $("showTracks").addEventListener("change", function () {
       map.set({ showTracks: this.checked });
       invalidatePanels(); renderSlow(); saveSettings();
+    });
+    $("trackFilter").addEventListener("input", function () {
+      map.set({ trackFilter: this.value.trim() });
+      saveSettings();
     });
     $("showPortals").addEventListener("change", function () {
       map.set({ showPortals: this.checked });

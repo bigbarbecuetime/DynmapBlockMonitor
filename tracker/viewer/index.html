@@ -110,6 +110,13 @@
         <label class="chk"><input type="checkbox" id="showRuler" checked> Coordinate ruler</label>
         <label class="chk"><input type="checkbox" id="showMarkers" checked> World border &amp; markers</label>
         <label class="chk"><input type="checkbox" id="showTracks"> Player tracks &amp; events</label>
+        <div class="row" id="trackFilterRow" hidden>
+          <div class="field">
+            <span>Only show player</span>
+            <input type="text" id="trackFilter" placeholder="name, or blank for all" list="trackPlayers">
+            <datalist id="trackPlayers"></datalist>
+          </div>
+        </div>
         <label class="chk"><input type="checkbox" id="showPortals"> Nether portals &amp; highway (Nelt)</label>
 
         <label class="chk"><input type="checkbox" id="showPolitical"> Political map underlay
@@ -257,6 +264,11 @@
     <details class="group">
       <summary>Busiest tiles</summary>
       <div class="group__body" id="topTiles"></div>
+    </details>
+
+    <details class="group" id="trackGroup" open>
+      <summary>Selected track</summary>
+      <div id="trackPanel"></div>
     </details>
 
     <details class="group" id="tileGroup">

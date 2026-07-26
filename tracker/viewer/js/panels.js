@@ -493,7 +493,77 @@ window.DV = window.DV || {};
     root.appendChild(t);
   }
 
+  /* One track in full: who, when, how it moved, and every event that starts or
+     ends on it. This is the answer to "what actually happened here". */
+  function renderTrackDetail(root, tr, events, model, hue, onSeek) {
+    root.innerHTML = "";
+    if (!tr) {
+      root.innerHTML = '<div class="empty">Click a track on the map to inspect it.</div>';
+      return;
+    }
+    var mine = (events || []).filter(function (e) {
+      return e.fromTrack === tr.id || e.toTrack === tr.id;
+    });
+    var who = tr.player
+      ? esc(tr.player) + (tr.confident ? "" : " <span style='opacity:.7'>(likely)</span>")
+      : "<span style='opacity:.7'>unattributed</span>";
+
+    root.appendChild(el(
+      '<div class="stats">' +
+      '<div class="stat stat--wide"><div class="stat__k">Track #' + tr.id +
+        (hue ? ' <span class="swatch" style="background:var(' + hue + ')"></span>' : '') +
+        '</div><div class="stat__v" style="font-size:15px">' + who + '</div>' +
+        (tr.attribution ? '<div class="stat__k" style="margin-top:3px">' + esc(tr.attribution) + '</div>' : '') +
+      '</div>' +
+      stat("From", M.fmtTime(tr.startMs), "") +
+      stat("To", M.fmtTime(tr.lastMs), M.fmtDur(tr.durationMs)) +
+      stat("Travelled", tr.blocksTravelled + " blocks", tr.speedBlocksPerSec.toFixed(1) + " b/s avg") +
+      stat("Chunks seen", String(tr.chunks || 0), "position +/- " + (tr.loadRadiusBlocks || 0) + " blocks") +
+      "</div>"));
+
+    // time spent per movement mode
+    var modes = Object.keys(tr.modeTime || {}).sort(function (a, b) { return tr.modeTime[b] - tr.modeTime[a]; });
+    if (modes.length) {
+      var t = document.createElement("table");
+      t.className = "tbl";
+      t.innerHTML = "<thead><tr><th>How it moved</th><th class=num>Time</th></tr></thead>";
+      var tb = document.createElement("tbody");
+      modes.forEach(function (mo) {
+        tb.appendChild(el("<tr><td>" + esc(mo) + "</td><td class=num>" +
+          M.fmtDur(tr.modeTime[mo] * 1000) + "</td></tr>"));
+      });
+      t.appendChild(tb);
+      root.appendChild(t);
+    }
+
+    root.appendChild(el('<div class="group__body" style="padding:8px 0 2px"><div class="stat__k">Events on this track (' +
+      mine.length + ')</div></div>'));
+    if (!mine.length) {
+      root.appendChild(el('<div class="empty">No teleports or dimension changes.</div>'));
+    } else {
+      var feed = el('<div class="feed"></div>');
+      mine.forEach(function (e) {
+        var dir = e.fromTrack === tr.id ? "left here" : "arrived here";
+        var item = document.createElement("div");
+        item.className = "feed__item";
+        item.innerHTML = '<span class="feed__t ts">' + M.fmtTime(e.ms) + "</span>" +
+          '<span class="feed__who" style="font-weight:400">' + dir + " &middot; " + e.blocks + "b" +
+            (e.explains ? '<br><span style="opacity:.75;font-size:11px">' + esc(e.explains) + "</span>" : "") +
+          "</span>" +
+          '<span class="feed__tag">' + esc(e.kind) + "</span>";
+        item.addEventListener("click", function () { if (onSeek) onSeek(e.ms); });
+        feed.appendChild(item);
+      });
+      root.appendChild(feed);
+    }
+
+    root.appendChild(el('<p class="hint">The line is where the player probably was &mdash; the centre of the ' +
+      'chunks loading around them &mdash; not the path they walked. Chunks load in a disc ahead of and ' +
+      'around a player, so the tiles lighting up are usually not the ones being walked over.</p>'));
+  }
+
   DV.panels = {
+    renderTrackDetail: renderTrackDetail,
     renderTracks: renderTracks,
     renderNow: renderNow,
     renderTransitions: renderTransitions,

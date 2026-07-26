@@ -83,6 +83,8 @@ window.DV = window.DV || {};
       showRuler: true,
       showMarkers: true,        // Dynmap's marker layer (world border, spawn, ...)
       tileKinds: "all",         // all | edits | loads  -- see the classification note in model.js
+      trackFilter: "",          // show only tracks for this player (substring, case-insensitive)
+      selectedTrack: null,      // id of the track whose details are open
       showTracks: false,        // inferred player tracks (see infer.js)
       showPortals: false,       // public nether portals + highway (the Nelt)
       political: null,          // {date, tiles:Set} historical political map beneath
@@ -557,7 +559,19 @@ window.DV = window.DV || {};
        together, brightest at the head so direction of travel is visible. Colour
        is per track, from the categorical slots, so two tracks crossing stay
        distinguishable. */
-    var TRACK_HUES = ["--series-players", "--series-tiles", "--series-3",
+    /* Stable name -> slot. A simple sum-of-codes hash: the palette has few slots
+     so collisions are unavoidable, and any hash will do as long as it is
+     deterministic across rebuilds. */
+  function playerHue(name) {
+    var h = 0;
+    for (var i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return TRACK_HUES[h % TRACK_HUES.length];
+  }
+  function trackHue(tr) {
+    return tr.player ? playerHue(tr.player) : "--text-3";
+  }
+
+  var TRACK_HUES = ["--series-players", "--series-tiles", "--series-3",
                       "--status-good", "--status-warning", "--status-critical"];
 
     function drawTracks() {
@@ -566,15 +580,25 @@ window.DV = window.DV || {};
       ctx.save();
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
+      var filter = (state.trackFilter || "").toLowerCase();
       for (var i = 0; i < tracks.length; i++) {
         var tr = tracks[i];
         if (tr.lastMs < state.t0 || tr.startMs > state.cursor) continue;
-        var col = cs.getPropertyValue(TRACK_HUES[i % TRACK_HUES.length]).trim();
+        if (filter && (tr.player || "").toLowerCase().indexOf(filter) < 0) continue;
+        /* Colour follows the PLAYER, not the track's position in the list. One
+           person's separate visits are the same colour every time -- which is
+           what makes "they left and came back here" legible -- and the colour
+           does not change when an unrelated track appears earlier in the list.
+           Unattributed tracks share one muted slot so they never impersonate a
+           named player. */
+        var col = cs.getPropertyValue(trackHue(tr)).trim();
         var pts = tr.points.filter(function (p) { return p.ms <= state.cursor; });
         if (pts.length < 2) continue;
+        var isSel = state.selectedTrack === tr.id;
         ctx.strokeStyle = col;
-        ctx.lineWidth = 2;
-        ctx.globalAlpha = tr.confident ? 0.9 : 0.5;   // unattributed tracks recede
+        ctx.lineWidth = isSel ? 4 : 2;
+        // Unattributed tracks recede; the selected one is pulled forward.
+        ctx.globalAlpha = isSel ? 1 : (tr.confident ? 0.9 : 0.5);
         ctx.beginPath();
         /* Track points are WORLD coordinates, so they go through the active
            map's projection like everything else -- which is what lets the same
@@ -942,8 +966,24 @@ window.DV = window.DV || {};
       if (pointers.size < 2) pinch = null;
       if (had && !dragged && ev.type === "pointerup") {
         var rect = canvas.getBoundingClientRect();
-        var c = cellAt(ev.clientX - rect.left, ev.clientY - rect.top);
+        var px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+        /* A track under the pointer wins over the tile beneath it: the track is
+           the smaller, more deliberate target, and the tile is always available
+           by clicking away from one. */
+        if (state.showTracks && opts.onTrackSelect) {
+          var g = toGrid(px, py);
+          var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+          var hit = api.trackAt(g.gx * bpt, -g.gy * bpt);
+          if (hit) {
+            state.selectedTrack = hit.id;
+            invalidate();
+            opts.onTrackSelect(hit);
+            return;
+          }
+        }
+        var c = cellAt(px, py);
         state.selected = c;
+        state.selectedTrack = null;
         invalidate();
         if (opts.onSelect) opts.onSelect(describe(c.tx, c.tz));
       }
@@ -1043,7 +1083,7 @@ window.DV = window.DV || {};
       });
     }
 
-    return {
+    var api = {
       canvas: canvas,
       setModel: function (m) {
         state.model = m;
@@ -1085,6 +1125,26 @@ window.DV = window.DV || {};
       setMarkers: function (data) { markers = data; invalidate(); },
       setMapConfig: function (cfg) { state.mapCfg = cfg || null; invalidate(); },
       setTracks: function (t, evs) { tracks = t; trackEvents = evs || null; invalidate(); },
+      trackHue: trackHue,
+      /* Nearest track to a world point, for click-to-inspect. Threshold scales
+         with zoom so the target stays roughly finger-sized on screen. */
+      trackAt: function (wx, wz) {
+        if (!tracks) return null;
+        var filter = (state.trackFilter || "").toLowerCase();
+        var tol = Math.max(24, 14 / Math.max(0.05, state.scale) * 8);
+        var best = null, bestD = Infinity;
+        for (var i = 0; i < tracks.length; i++) {
+          var tr = tracks[i];
+          if (tr.lastMs < state.t0 || tr.startMs > state.cursor) continue;
+          if (filter && (tr.player || "").toLowerCase().indexOf(filter) < 0) continue;
+          for (var j = 0; j < tr.points.length; j++) {
+            if (tr.points[j].ms > state.cursor) break;
+            var d = Math.hypot(tr.points[j].tx - wx, tr.points[j].tz - wz);
+            if (d < tol && d < bestD) { bestD = d; best = tr; }
+          }
+        }
+        return best;
+      },
       setNelt: function (p, h) { portals = p; highways = h; invalidate(); },
       setPolitical: function (cfg) { state.political = cfg; invalidate(); },
       markerSummary: function () {
@@ -1120,6 +1180,7 @@ window.DV = window.DV || {};
       },
       zoomBy: function (f) { setScale(state.scale * f, state.w / 2, state.h / 2); }
     };
+    return api;
   }
 
   DV.createMap = createMap;

@@ -186,6 +186,19 @@ not world axes once the view is skewed).
 **Player tracks** link chunk loads into paths. Dynmap redraws a chunk when it is
 loaded, which is what happens as someone walks into new terrain, so loads are the
 movement signal — and the load/edit split above separates them from building.
+**Tile times are shifted back by the render-queue delay.** `tile_ts` is when
+Dynmap *finished redrawing* a tile, not when the chunk loaded — its queue runs
+over a minute deep on this server, so uncorrected, every track drags past the
+session that caused it and tracks appear in windows with nobody online. The
+delay is estimated as the backward shift that leaves the fewest tiles
+attributable to nobody (~60–80s here). On the calibration session that moves the
+first tile from join +51s to −29s and the last from leave +84s to +4s, with 98%
+of the session's tiles falling inside the session.
+
+Each player keeps **one colour across all their tracks**, so separate visits to
+the same place are legible as the same person; unattributed tracks share a muted
+slot. Click a track for its details and events, and filter to one player by name.
+
 A calibration session (standing at a known spot, then a 52-block sprint, then a
 64-block walk) set the resolution limits: the load disc's centroid tracked the
 player's X almost exactly but carried a **~110-block standing bias** in Z —
