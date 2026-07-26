@@ -21,6 +21,7 @@ the two things the viewer actually benefits from:
 """
 
 import argparse
+import csv
 import json
 import os
 import posixpath
@@ -42,6 +43,28 @@ RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 WORLD_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
+
+# Ground truth, typed in by a human: "at this instant this player was standing
+# HERE". It is the only thing in the system that knows a real position, so it is
+# what any fit or accuracy claim has to be scored against.
+#
+# Kept in its own directory rather than data/, because the viewer mounts data/
+# READ-ONLY on purpose -- it should never be able to corrupt what the tracker
+# recorded. Calibration is the one thing the page legitimately writes, so it gets
+# a separate writable mount and that guarantee survives.
+CAL_DIR = ROOT / "calibration"
+CAL_FILE = CAL_DIR / "calibration.csv"
+CAL_FIELDS = ["time", "player", "x", "y", "z", "activity", "radius", "note"]
+# What the player was doing matters as much as where. Standing still and mining
+# produce completely different render signatures -- ambient growth around a
+# stationary disc versus blockbreak at the player -- so a fit that ignores the
+# activity is averaging two different physical processes.
+CAL_ACTIVITIES = ("standing", "walking", "running", "mining", "building",
+                  "boat", "horse", "elytra", "portal", "unknown")
+CAL_MAX_ROWS = 20000
+CAL_MAX_BODY = 4096
 
 # Outside data the viewer overlays, each pinned to one host and one shape of path.
 # Nothing here takes a caller-supplied host: these are proxied only because the
@@ -88,6 +111,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.api_political(path[len("/api/political/"):])
         if path.startswith("/api/nelt/"):
             return self.api_nelt(path[len("/api/nelt/"):])
+        if path == "/api/calibration":
+            return self.api_calibration_list()
         if path == "/api/config":
             # Same CORS problem as the markers, same fixed-host mitigation. This
             # carries each map type's worldtomap matrix, which is what lets the
@@ -230,6 +255,99 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---- calibration: the only thing the page is allowed to write ---------
+
+    def do_POST(self):
+        path = getattr(self, "path", "").split("?", 1)[0]
+        if path == "/api/calibration":
+            return self.api_calibration_add()
+        return self._json_error(HTTPStatus.NOT_FOUND, "no such endpoint")
+
+    def api_calibration_list(self):
+        rows = []
+        try:
+            with CAL_FILE.open("r", encoding="utf-8", newline="") as f:
+                for row in csv.DictReader(f):
+                    rows.append({k: row.get(k, "") for k in CAL_FIELDS})
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            return self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "could not read calibration: %s" % e)
+        return self._send_json({"records": rows})
+
+    def api_calibration_add(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json_error(HTTPStatus.BAD_REQUEST, "bad Content-Length")
+        if length <= 0 or length > CAL_MAX_BODY:
+            return self._json_error(HTTPStatus.BAD_REQUEST,
+                                    "body must be 1..%d bytes" % CAL_MAX_BODY)
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception as e:
+            return self._json_error(HTTPStatus.BAD_REQUEST, "body is not JSON: %s" % e)
+        if not isinstance(payload, dict):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "expected a JSON object")
+
+        # Validate every field before touching the file: a calibration record is
+        # ground truth, and a malformed one is worse than a missing one because
+        # everything downstream trusts it.
+        stamp = str(payload.get("time", "")).strip()
+        if not STAMP_RE.match(stamp):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "time must be YYYY-MM-DDTHH:MM:SSZ")
+        player = str(payload.get("player", "")).strip()
+        if not NAME_RE.match(player):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "player must be 1-32 chars of [A-Za-z0-9_]")
+        coords = {}
+        for axis in ("x", "y", "z"):
+            try:
+                coords[axis] = float(payload.get(axis))
+            except (TypeError, ValueError):
+                return self._json_error(HTTPStatus.BAD_REQUEST, "%s must be a number" % axis)
+            if not -30e6 <= coords[axis] <= 30e6:
+                return self._json_error(HTTPStatus.BAD_REQUEST, "%s is outside the world border" % axis)
+        activity = str(payload.get("activity", "unknown")).strip().lower() or "unknown"
+        if activity not in CAL_ACTIVITIES:
+            return self._json_error(HTTPStatus.BAD_REQUEST,
+                                    "activity must be one of: %s" % ", ".join(CAL_ACTIVITIES))
+        try:
+            radius = float(payload.get("radius", 0) or 0)
+        except (TypeError, ValueError):
+            return self._json_error(HTTPStatus.BAD_REQUEST, "radius must be a number")
+        if not 0 <= radius <= 4096:
+            return self._json_error(HTTPStatus.BAD_REQUEST, "radius must be 0..4096 blocks")
+        note = str(payload.get("note", ""))[:200].replace("\n", " ").replace("\r", " ")
+
+        try:
+            CAL_DIR.mkdir(parents=True, exist_ok=True)
+            is_new = not CAL_FILE.exists() or CAL_FILE.stat().st_size == 0
+            if not is_new:
+                with CAL_FILE.open("r", encoding="utf-8", newline="") as f:
+                    if sum(1 for _ in f) - 1 >= CAL_MAX_ROWS:
+                        return self._json_error(HTTPStatus.INSUFFICIENT_STORAGE,
+                                                "calibration file is at its %d row cap" % CAL_MAX_ROWS)
+            with CAL_FILE.open("a", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=CAL_FIELDS)
+                if is_new:
+                    w.writeheader()
+                w.writerow({"time": stamp, "player": player,
+                            "x": coords["x"], "y": coords["y"], "z": coords["z"],
+                            "activity": activity, "radius": radius, "note": note})
+        except OSError as e:
+            return self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR,
+                                    "could not write calibration: %s" % e)
+        return self._send_json({"ok": True})
+
+    def _send_json(self, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 

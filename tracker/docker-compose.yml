@@ -47,5 +47,10 @@ services:
       # /app/data because serve.py serves its own parent folder as "/", which puts
       # the page at /viewer/ and the CSVs at /data/.
       - ./data:/app/data:ro
+      # Writable, and deliberately a SEPARATE mount. Calibration is ground truth
+      # typed in by a person, so the page has to be able to write it -- but that
+      # must not cost the guarantee above, that the viewer can never alter what
+      # the tracker recorded. Its own directory keeps both.
+      - ./calibration:/app/calibration
     depends_on:
       - tracker
