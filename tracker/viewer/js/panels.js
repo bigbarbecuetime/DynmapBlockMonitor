@@ -59,10 +59,22 @@ window.DV = window.DV || {};
          "nobody came or went for 14 minutes", which is information rather than a
          caveat. Say that instead of implying the number is going off. */
       if (isFinite(stale) && stale > Math.max(120000, model.playerPollMs * 6)) {
-        parts.push(q("good", "✓", "No one has joined or left in " + M.fmtDur(stale),
-          "The roster has been unchanged since " + M.fmtTime(snap.ms) +
-          ". The tracker is still polling every " + M.fmtDur(model.playerPollMs) +
-          "; it only writes a row when the count or the names change."));
+        /* "Unchanged" only means something if we were watching the whole time.
+           A held row on the far side of an outage is not evidence that nobody
+           came or went -- it is evidence that nobody was looking. A 15.7h
+           tracker outage was being reported as "no one has joined or left in
+           14h 4m", with the reassurance that polling was ongoing. */
+        var off = offBetween(model, snap.ms, cursorMs);
+        if (off > Math.max(model.playerPollMs * 3, 60000)) {
+          parts.push(q("serious", "▲", "No roster row for " + M.fmtDur(stale) + ", but the tracker was off for " + M.fmtDur(off),
+            "The last row is from " + M.fmtTime(snap.ms) + ", on the far side of a gap in recording. " +
+            "Players could have come and gone unseen; the roster shown is the last one observed, not a current reading."));
+        } else {
+          parts.push(q("good", "✓", "No one has joined or left in " + M.fmtDur(stale),
+            "The roster has been unchanged since " + M.fmtTime(snap.ms) +
+            ". The tracker is still polling every " + M.fmtDur(model.playerPollMs) +
+            "; it only writes a row when the count or the names change."));
+        }
       }
       if (snap.truncated) {
         parts.push(q("serious", "⚠", "Roster is incomplete",
@@ -101,6 +113,19 @@ window.DV = window.DV || {};
       }
       root.appendChild(r);
     }
+  }
+
+  /* Milliseconds between a and b that no tracker run covers. The runs are built
+     in order and do not overlap, so walking them and summing the holes is
+     enough; anything outside every run is time nobody was recording. */
+  function offBetween(model, aMs, bMs) {
+    if (!model || !model.coverage || !(bMs > aMs)) return 0;
+    var cov = model.coverage, on = 0;
+    for (var i = 0; i < cov.length; i++) {
+      var s = Math.max(aMs, cov[i].startMs), e = Math.min(bMs, cov[i].endMs);
+      if (e > s) on += e - s;
+    }
+    return Math.max(0, (bMs - aMs) - on);
   }
 
   function stat(k, v, sub) {
