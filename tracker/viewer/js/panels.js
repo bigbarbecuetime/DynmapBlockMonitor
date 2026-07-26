@@ -536,7 +536,9 @@ window.DV = window.DV || {};
     root.appendChild(el(
       '<div class="stats">' +
       '<div class="stat stat--wide"><div class="stat__k">Track #' + tr.id +
-        (hue ? ' <span class="swatch" style="background:var(' + hue + ')"></span>' : '') +
+        /* hue is a resolved colour now, not a CSS custom-property name: player
+           colours are generated around the hue circle and have no token. */
+        (hue ? ' <span class="swatch" style="background:' + esc(hue) + '"></span>' : '') +
         '</div><div class="stat__v" style="font-size:15px">' + who + '</div>' +
         (tr.attribution ? '<div class="stat__k" style="margin-top:3px">' + esc(tr.attribution) + '</div>' : '') +
       '</div>' +

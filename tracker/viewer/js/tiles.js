@@ -559,20 +559,59 @@ window.DV = window.DV || {};
        together, brightest at the head so direction of travel is visible. Colour
        is per track, from the categorical slots, so two tracks crossing stay
        distinguishable. */
-    /* Stable name -> slot. A simple sum-of-codes hash: the palette has few slots
-     so collisions are unavoidable, and any hash will do as long as it is
-     deterministic across rebuilds. */
-  function playerHue(name) {
-    var h = 0;
-    for (var i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-    return TRACK_HUES[h % TRACK_HUES.length];
-  }
-  function trackHue(tr) {
-    return tr.player ? playerHue(tr.player) : "--text-3";
+  /* Player colours are GENERATED, not picked from the categorical slots.
+     Hashing names into a six-slot palette meant two players collided as soon as
+     there were seven of them -- and well before that, because a hash lands
+     wherever it lands, so three people could share one slot while three slots
+     went unused. On a map where the whole point is telling one person's line
+     from another's, that is the wrong failure.
+
+     Instead give every player an index and space the indices around the hue
+     circle by the golden angle (137.5 degrees). That angle is what makes any
+     PREFIX of the sequence well spread, not just the full set: with four
+     players the hues sit at 0, 137, 275 and 52, and adding a fifth moves
+     nobody. Lightness cycles through three themed steps as well, because the
+     hues that eventually come closest under a golden angle are the ones whose
+     indices differ by a Fibonacci number -- 5, 8, 13 -- and none of those is
+     divisible by 3, so every near-pair in hue is forced apart in value. A
+     two-step cycle missed the even offsets: at ten players the closest pair sat
+     20 degrees apart at the SAME lightness.
+
+     Indices come from the sorted roster rather than track order, so a player
+     keeps one colour across every track they own and across a rebuild. */
+  var hueIndex = Object.create(null), hueCount = 0;
+
+  function registerPlayers(names) {
+    var sorted = names.slice().sort();
+    hueIndex = Object.create(null);
+    for (var i = 0; i < sorted.length; i++) hueIndex[sorted[i]] = i;
+    hueCount = sorted.length;
   }
 
-  var TRACK_HUES = ["--series-players", "--series-tiles", "--series-3",
-                      "--status-good", "--status-warning", "--status-critical"];
+  function playerColour(name, cs) {
+    var i = hueIndex[name];
+    if (i === undefined) {
+      // Not in the roster (a filtered rebuild, say): fall back to a hash so the
+      // colour is still stable rather than jumping between frames.
+      var h = 0;
+      for (var k = 0; k < name.length; k++) h = (h * 31 + name.charCodeAt(k)) >>> 0;
+      i = hueCount + (h % 97);
+    }
+    var hue = (i * 137.508) % 360;
+    var sat = cs.getPropertyValue("--track-sat").trim() || "74%";
+    var step = ["--track-lum", "--track-lum-alt", "--track-lum-3"][i % 3];
+    var lum = cs.getPropertyValue(step).trim() || "45%";
+    return "hsl(" + hue.toFixed(1) + " " + sat + " " + lum + ")";
+  }
+
+  /* Returns a colour, not a variable name: generated hues have no CSS token to
+     point at. Unattributed tracks stay on the muted ink so they never
+     impersonate a named player. */
+  function trackHue(tr, cs) {
+    cs = cs || getComputedStyle(canvas);
+    if (!tr || !tr.player) return cs.getPropertyValue("--text-3").trim() || "#898781";
+    return playerColour(tr.player, cs);
+  }
 
     function drawTracks() {
       if (!tracks || !state.showTracks || !tracks.length) return;
@@ -591,7 +630,7 @@ window.DV = window.DV || {};
            does not change when an unrelated track appears earlier in the list.
            Unattributed tracks share one muted slot so they never impersonate a
            named player. */
-        var col = cs.getPropertyValue(trackHue(tr)).trim();
+        var col = trackHue(tr, cs);
         var pts = tr.points.filter(function (p) { return p.ms <= state.cursor; });
         if (pts.length < 2) continue;
         var isSel = state.selectedTrack === tr.id;
@@ -1124,7 +1163,18 @@ window.DV = window.DV || {};
       setHistorical: function (set) { historical = set; images.clear(); invalidate(); },
       setMarkers: function (data) { markers = data; invalidate(); },
       setMapConfig: function (cfg) { state.mapCfg = cfg || null; invalidate(); },
-      setTracks: function (t, evs) { tracks = t; trackEvents = evs || null; invalidate(); },
+      setTracks: function (t, evs) {
+        tracks = t; trackEvents = evs || null;
+        /* Re-derive the roster whenever the tracks change, so hue indices are a
+           function of who is present rather than of build order. */
+        var names = [], seen = Object.create(null);
+        for (var i = 0; t && i < t.length; i++) {
+          var p = t[i].player;
+          if (p && !seen[p]) { seen[p] = 1; names.push(p); }
+        }
+        registerPlayers(names);
+        invalidate();
+      },
       trackHue: trackHue,
       /* Nearest track to a world point, for click-to-inspect. Threshold scales
          with zoom so the target stays roughly finger-sized on screen. */
