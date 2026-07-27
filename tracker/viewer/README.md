@@ -313,13 +313,45 @@ in rounds to a fixed point:
 
 Every assignment removes that name from every track overlapping it in time —
 one person is in one place — which is what lets a busy evening resolve inward
-from whoever left first. Rules 2 and 3 additionally check the geometry: a name
-is refused if it would have to travel faster than 80 blocks/s from wherever the
-model already put that player. That is the nether case, and the calibration
-caught it — someone stepped into a portal and the leftover overworld track 6,441
-blocks away was being confidently handed to them. Held ground takes no name at
-all; it is not a person, and letting it consume a candidate pushes a real track
-onto the wrong player.
+from whoever left first. Held ground takes no name at all; it is not a person,
+and letting it consume a candidate pushes a real track onto the wrong player.
+
+Every rule also has to answer for the geometry, because two overlapping tracks
+compete for the same names and whichever is assigned first takes one out of play
+for the other. But **"too fast" is not a speed limit**: a pearl parked in a
+stasis chamber crosses any distance instantly, so 11,000 blocks in ninety
+seconds is ordinary play. What it is not is unconditional — a pull needs a
+chamber at the far end, and a chamber is a loaded chunk holding an entity, which
+is to say it is *held ground and this pass has already found it*. So arriving on
+held ground is allowed at any speed; arriving on open ground faster than 80
+blocks/s is refused, because there is nothing there to have pulled them. The
+calibration case survives either way: the pale-oak forest ran at 1.27 renders
+per chunk, nobody was holding it, and nothing puts a player in the middle of it
+ninety seconds after they were 11,000 blocks away.
+
+### Stasis chambers
+
+That last point runs in reverse and becomes a finding rather than a caveat.
+Since a chamber is a chunk loader by construction, the held-site pass has
+already located every chamber that gets used, without knowing that is what it
+was looking for. The signature is then: **somebody appears on held ground,
+instantly, from far enough away that nothing else explains it.** Over this log
+45 of 118 inter-track jumps land within 256 blocks of held ground, and 7 land on
+ground that was demonstrably being held *at the moment of arrival* — the time
+test matters, and it earns its keep: repeat arrivals at (2047,−4752) stay
+labelled `dimension`, because that ground is only ever held during one
+36-minute episode three days earlier. It is a portal room, not a chamber.
+
+What survives reads exactly like chamber use: `CrazyCraftix` pulled to
+(−5157,−1946) twice, six minutes apart; two different players landed on
+(−721,−1124) five minutes apart. Places are ranked by repeat arrivals, since
+one is a jump we could not otherwise account for and three by different people
+on different days is a chamber people share.
+
+The nether reading stays on the record alongside it — at 60-second slices an
+instant arrival and a minute of nether travel are not separable by timing, and
+what tells them apart is *where you land*. A portal need not be held ground; a
+chamber necessarily is.
 
 Linking is by proximity in space and time, never by the order tiles arrive: tiles
 come off the feed sorted by ascending x (perfectly ascending in **92%** of polls

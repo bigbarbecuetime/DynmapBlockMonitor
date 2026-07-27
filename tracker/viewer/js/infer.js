@@ -617,7 +617,7 @@ window.DV = window.DV || {};
       tr.loadRadiusBlocks = Math.round(rsum / tr.points.length);
       tr.speedBlocksPerSec = tr.durationMs > 0 ? tr.blocksTravelled / (tr.durationMs / 1000) : 0;
     });
-    attributeTracks(tracks, model, opts, sliceMs);
+    attributeTracks(tracks, model, opts, sliceMs, held.sites);
 
     // Settle the path before reading anything off it, then label every leg and
     // lift the impossible ones out as events.
@@ -764,11 +764,12 @@ window.DV = window.DV || {};
      before logging out. This only ever ADDS evidence; it never eliminates. */
   var EDGE_WINDOW_MS = 300000;
 
-  function attributeTracks(tracks, model, opts, sliceMs) {
+  function attributeTracks(tracks, model, opts, sliceMs, heldSites) {
     opts = opts || {};
     var edge = opts.edgeWindowMs === undefined ? EDGE_WINDOW_MS : opts.edgeWindowMs;
     var snaps = model.snapshots || [];
     var free = [];
+    var places = heldPlaces(heldSites);
 
     /* Viability is decided against each player's ONLINE INTERVAL, not by
        intersecting the rosters attached to the track's points. Point-wise
@@ -850,27 +851,44 @@ window.DV = window.DV || {};
        at Jaune four minutes later, and the leftover track 6,441 blocks away was
        confidently assigned to them.
 
-       So the weaker rules have to answer for the geometry: a name is only
-       accepted if getting there from wherever we already put them is possible
-       at all. The threshold is the one MODES already calls impossible on foot;
-       what falls out is left unattributed rather than guessed, and linkEvents
-       still surfaces the jump for anyone reading it. */
+       So an assignment has to answer for the geometry. But "too fast to be
+       real" is NOT a speed limit, and saying so was wrong: an ender pearl
+       parked in a stasis chamber crosses any distance instantly, so 11,000
+       blocks in ninety seconds is perfectly ordinary play. What it is not is
+       UNCONDITIONAL -- a pull needs a chamber at the far end, and a chamber is
+       a loaded chunk holding an entity, which is to say it is held ground and
+       this pass has already found it. So:
+
+         * arriving somewhere held, at any speed, is allowed. That is what a
+           stasis pull looks like from outside, and refusing it would throw
+           away real movement;
+         * arriving on open ground faster than anything can travel is refused,
+           because there is nothing there to have pulled them.
+
+       The case that started this survives the correction: the pale-oak forest
+       ran at 1.27 renders per chunk, nobody was holding it, and there is no
+       mechanism that puts a player in the middle of it ninety seconds after
+       they were 11,000 blocks away. */
     var maxBps = opts.maxAttributionBps === undefined ? 80 : opts.maxAttributionBps;
     function reachable(tr, name) {
       for (var i = 0; i < free.length; i++) {
         var u = free[i];
         if (u === tr || u.player !== name || !u.points.length) continue;
-        var gapMs, d;
+        var gapMs, d, arrival;
         if (u.lastMs <= tr.startMs) {
           gapMs = tr.startMs - u.lastMs;
           d = Math.hypot(tr.points[0].tx - u.lastTx, tr.points[0].tz - u.lastTz);
+          arrival = tr.points[0];
         } else if (u.startMs >= tr.lastMs) {
           gapMs = u.startMs - tr.lastMs;
           d = Math.hypot(u.points[0].tx - tr.lastTx, u.points[0].tz - tr.lastTz);
+          arrival = u.points[0];
         } else {
           return false;                       // overlapping in time: one person, one place
         }
-        if (d / Math.max(1, gapMs / 1000) > maxBps) return false;
+        if (d / Math.max(1, gapMs / 1000) <= maxBps) continue;
+        if (onHeldGround(places, arrival.tx, arrival.tz, arrival.ms)) continue;
+        return false;
       }
       return true;
     }
@@ -975,6 +993,67 @@ window.DV = window.DV || {};
        feeds line up: the panel and the map both walk this list. */
     tracks.sort(function (a, b) { return a.startMs - b.startMs; });
     return tracks;
+  }
+
+  /* ==========================================================================
+     STASIS CHAMBERS
+     --------------------------------------------------------------------------
+     A pearl parked in a stasis chamber is an entity sitting in a loaded chunk,
+     so a chamber is a chunk loader by construction -- which means the held-site
+     pass has already located every one of them that gets used, without knowing
+     it was looking. The signature is then simply: somebody appears at held
+     ground, instantly, from far enough away that nothing else explains it.
+
+     That is a positive inference, not a nuisance to be filtered. Over this log
+     50 of 126 inter-track jumps land within 256 blocks of held ground, and the
+     fastest of them land within 75-120 blocks of it -- inside the position
+     error, i.e. on it. Several places take repeat arrivals: (2043,-4770) three
+     times, (-924,4594), (173,-1343) and (-733,-906) twice each. A place people
+     keep materialising at, which is being kept loaded, is a chamber.
+
+     The honest alternative stays on the record: a nether crossing that works
+     out arithmetically is still reported as one, because at 60-second slices an
+     instant arrival and a minute of nether travel are not distinguishable by
+     timing alone. What distinguishes them is where you land -- a portal is not
+     necessarily held ground, a chamber necessarily is.
+     ======================================================================== */
+
+  /* How close to a held place counts as landing ON it. The position estimate
+     carries about 86 blocks of error and the site itself is a few hundred
+     across, so this is "within the place", not "near it". */
+  var HELD_LANDING_BLOCKS = 256;
+
+  /* Held EPISODES collapse onto the places they happened at: the same chamber
+     used on three days is one chamber, and its repeat count is the evidence. */
+  function heldPlaces(heldSites) {
+    var by = new Map();
+    for (var i = 0; i < (heldSites || []).length; i++) {
+      var ep = heldSites[i], k = ep.site.id;
+      if (!by.has(k)) by.set(k, { cx: ep.site.cx, cz: ep.site.cz, windows: [], arrivals: [] });
+      by.get(k).windows.push([ep.firstMs, ep.lastMs]);
+    }
+    return Array.from(by.values());
+  }
+
+  /* On held ground, at a moment that ground was actually being held. The time
+     test matters: a place is only a chunk loader while it is switched on, and
+     the same coordinates can be an ordinary base the week before. */
+  function onHeldGround(places, x, z, ms) {
+    return !!heldPlaceAt(places, x, z, ms);
+  }
+
+  function heldPlaceAt(places, x, z, ms) {
+    for (var i = 0; i < (places || []).length; i++) {
+      var p = places[i];
+      if (Math.hypot(p.cx - x, p.cz - z) > HELD_LANDING_BLOCKS) continue;
+      if (ms === undefined) return p;
+      for (var w = 0; w < p.windows.length; w++) {
+        // one slice of slack either side: an arrival can precede the first
+        // render the place produces after being switched on
+        if (ms >= p.windows[w][0] - 120000 && ms <= p.windows[w][1] + 120000) return p;
+      }
+    }
+    return null;
   }
 
   /* Every stretch each player was continuously online, from the snapshots.
@@ -1429,6 +1508,7 @@ window.DV = window.DV || {};
     var bpt = model.blocksPerTile;
     var maxGapMs = opts.eventGapMs === undefined ? 600000 : opts.eventGapMs;  // 10 min
     var portals = opts.portals || null;
+    var places = heldPlaces(tracks && tracks.heldSites);
     var out = [];
 
     /* Held ground has no arrivals and no departures: nobody travelled to or
@@ -1475,6 +1555,22 @@ window.DV = window.DV || {};
                                  : "too fast for any overworld travel; a portal pair or a command";
         if (dist <= 50) ev.kind = "pearl";
       }
+      /* Landed on ground something is holding loaded. A stasis chamber is
+         exactly that -- a pearl is an entity and an entity needs its chunk up
+         -- so this is the arrival end of a pull, and it is reported as the
+         mechanism it is rather than being averaged into "teleport". The nether
+         reading above is left in place where the arithmetic supports it; both
+         can be true of the same jump and the reader deserves to see both. */
+      var land = heldPlaceAt(places, ev.toTx, ev.toTz, ev.endMs);
+      if (land && ev.bps > 8) {
+        land.arrivals.push(ev);
+        ev.landsOnHeld = { x: land.cx, z: land.cz, distBlocks: Math.hypot(land.cx - ev.toTx, land.cz - ev.toTz) };
+        ev.kind = "stasis";
+        ev.explains = "arrives on ground being held loaded (" + Math.round(ev.landsOnHeld.distBlocks) +
+          " blocks from its centre) -- a pearl in a stasis chamber keeps its own chunk up, which is what " +
+          "this looks like from outside" + (ev.explains ? "; " + ev.explains : "");
+      }
+
       if (portals) {
         var pFrom = nearestPortal(portals, a.lastTx, a.lastTz);
         var pTo = nearestPortal(portals, ev.toTx, ev.toTz);
@@ -1503,6 +1599,12 @@ window.DV = window.DV || {};
       }
       out.push(ev);
     }
+    /* The places themselves, ranked by how often someone materialised there.
+       One arrival is a jump we could not otherwise explain; three at the same
+       held place, by different people on different days, is a chamber people
+       use -- and that is a fact about the map, not about any one journey. */
+    out.stasisSites = places.filter(function (p) { return p.arrivals.length; })
+      .sort(function (a, b) { return b.arrivals.length - a.arrivals.length; });
     return out;
   }
 

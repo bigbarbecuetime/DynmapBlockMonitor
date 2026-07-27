@@ -477,7 +477,7 @@ window.DV = window.DV || {};
   /* Inferred paths, with the honesty up front: the score line says how often the
      number of live tracks matched the number of people actually online, which is
      the only external check available. */
-  function renderTracks(root, tracks, score, model, onPick) {
+  function renderTracks(root, tracks, score, model, onPick, events) {
     root.innerHTML = "";
     if (!tracks) { root.innerHTML = '<div class="empty">Enable "Inferred player tracks" to build these.</div>'; return; }
     if (!tracks.length) { root.innerHTML = '<div class="empty">No tracks in this window.</div>'; return; }
@@ -499,6 +499,23 @@ window.DV = window.DV || {};
         "loading somewhere else. That is a chunk loader, a farm, or spawn chunks &mdash; the renders " +
         "there locate the machine, not a player, so they are shown as a fixed place rather than " +
         "joined into anybody's path.")));
+    }
+
+    /* Held ground that people keep materialising on. A pearl parked in a stasis
+       chamber is an entity, an entity needs its chunk loaded, so every chamber
+       in use is already in the held list -- this just says which of them get
+       arrived at. */
+    var stasis = (events && events.stasisSites) || [];
+    if (stasis.length) {
+      root.appendChild(el(q("warning", "◈",
+        stasis.length + " place" + (stasis.length > 1 ? "s people appear at" : " people appear at"),
+        "Someone arrived here faster than any travel allows, on ground that was being kept loaded at " +
+        "the time &mdash; which is what an ender-pearl stasis chamber looks like from outside, since the " +
+        "parked pearl is what holds the chunk up. " +
+        stasis.slice(0, 4).map(function (s) {
+          return "(" + Math.round(s.cx) + ", " + Math.round(s.cz) + ") &times;" + s.arrivals.length +
+            " &mdash; " + esc(Array.from(new Set(s.arrivals.map(function (a) { return a.player || "someone"; }))).join(", "));
+        }).join("; ") + ".")));
     }
 
     if (score) {

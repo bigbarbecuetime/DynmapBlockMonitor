@@ -563,7 +563,7 @@
       P.renderTracks($("tracksPanel"), state.tracks, state.trackScore, m, function (tr) {
         map.centerOn(tr.points[0].tx, tr.points[0].tz, Math.max(map.view().scale, 4));
         seek(tr.startMs);
-      });
+      }, state.trackEvents);
       $("trackCount").textContent = state.tracks ? state.tracks.length + " found" : "";
     }
 

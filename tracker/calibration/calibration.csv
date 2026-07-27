@@ -11,3 +11,7 @@ time,player,x,y,z,activity,radius,note
 2026-07-27T14:38:28Z,bigboytrain360,2123.0,63.0,-4843.0,portal,0.0,Entering nether portal
 2026-07-27T14:42:37Z,bigboytrain360,540.0,64.0,-34.0,portal,0.0,"Exited at ""Jaune"" nether portal"
 2026-07-27T15:20:36Z,bigboytrain360,615.0,68.0,-264.0,standing,0.0,Joined the game at this positon
+2026-07-27T15:22:22Z,bigboytrain360,196.0,63.0,-204.0,running,0.0,Ran to this position after joining
+2026-07-27T15:24:20Z,bigboytrain360,196.0,63.0,-204.0,standing,0.0,Stood at this position until leaving at recording time
+2026-07-27T15:25:14Z,bigboytrain360,128.0,63.0,-215.0,portal,0.0,Entered nether portal here
+2026-07-27T15:28:09Z,bigboytrain360,2123.0,63.0,-4845.0,portal,0.0,"Exited ""North Point"" nether portal"

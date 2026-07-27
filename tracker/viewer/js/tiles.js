@@ -766,7 +766,9 @@ window.DV = window.DV || {};
            so it never reads as an explained route. */
         var explained = !!e.explains;
         ctx.setLineDash(explained ? [5, 4] : [1, 5]);
-        ctx.strokeStyle = e.kind === "portal" ? pal.warning : pal.critical;
+        // portal and stasis are named mechanisms; everything else is a jump we
+        // could not account for and stays on the alarming colour.
+        ctx.strokeStyle = (e.kind === "portal" || e.kind === "stasis") ? pal.warning : pal.critical;
         ctx.lineWidth = explained ? 1.5 : 1;
         ctx.globalAlpha = explained ? 0.85 : 0.5;
         ctx.beginPath();
