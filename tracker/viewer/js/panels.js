@@ -482,12 +482,24 @@ window.DV = window.DV || {};
     if (!tracks) { root.innerHTML = '<div class="empty">Enable "Inferred player tracks" to build these.</div>'; return; }
     if (!tracks.length) { root.innerHTML = '<div class="empty">No tracks in this window.</div>'; return; }
 
-    var named = tracks.filter(function (t) { return t.player; }).length;
+    var people = tracks.filter(function (t) { return !t.held; });
+    var ground = tracks.length - people.length;
+    var named = people.filter(function (t) { return t.player; }).length;
     root.appendChild(el('<div class="stats">' +
-      stat("Tracks", String(tracks.length), named + " attributable") +
+      stat("Player tracks", String(people.length), named + " attributable") +
+      stat("Held ground", String(ground), ground ? "kept loaded, not walked" : "none found") +
       stat("Match roster", score ? Math.round(score.exact * 100) + "%" : "&mdash;",
            score ? "off by " + score.meanAbsErr.toFixed(2) + " on average" : "") +
       "</div>"));
+
+    if (ground) {
+      root.appendChild(el(q("info", "▣", ground + " place" + (ground > 1 ? "s were" : " was") + " being held loaded",
+        "Somewhere with more going on than the head-count allows: while one person was online, " +
+        "this place kept re-rendering chunks it already had, at the same time as fresh ground was " +
+        "loading somewhere else. That is a chunk loader, a farm, or spawn chunks &mdash; the renders " +
+        "there locate the machine, not a player, so they are shown as a fixed place rather than " +
+        "joined into anybody's path.")));
+    }
 
     if (score) {
       root.appendChild(el(q("info", "○", "Idle players are invisible here",
@@ -507,10 +519,12 @@ window.DV = window.DV || {};
         "<td>" + M.fmtDur(tr.durationMs) + "</td>" +
         "<td class=num>" + tr.blocksTravelled.toLocaleString() + "</td>" +
         "<td class=num>" + tr.speedBlocksPerSec.toFixed(1) + "</td>" +
-        "<td>" + (tr.player ? esc(tr.player)
+        "<td>" + (tr.held ? '<span style="opacity:.65">held ground</span>'
+                 : tr.player ? esc(tr.player)
                  : '<span style="opacity:.65">' + (tr.candidates.length ? esc(tr.candidates.slice(0, 2).join(" / ")) : "unknown") + "</span>") + "</td>";
-      row.title = tr.confident ? "Only this player was online for the whole track"
-                               : "More than one player was online, so this cannot be pinned to one of them";
+      row.title = tr.held
+        ? "A place being kept loaded. Its renders do not say anyone was standing there."
+        : tr.attribution || "Not pinned to anyone: more than one player fits, and nothing rules the others out.";
       row.addEventListener("click", function () { if (onPick) onPick(tr); });
       tb.appendChild(row);
     });

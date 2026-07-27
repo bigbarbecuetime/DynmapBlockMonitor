@@ -286,7 +286,43 @@ window.DV = window.DV || {};
                  kind: t.kind, online: t.online, roster: t.roster });
     }
     out.sort(function (a, b) { return a.ms - b.ms; });
+    markFresh(out, opts.chunkHoldMs);
     return out;
+  }
+
+  /* ==========================================================================
+     A CHUNK LOADING IS NEWS; A CHUNK STAYING LOADED IS NOT
+     --------------------------------------------------------------------------
+     Renders only fire in LOADED chunks, so a render says "this chunk was
+     loaded" -- but that is a state, not an event, and only the moment it
+     BECAME loaded locates anybody. A chunk held loaded for an hour keeps
+     re-rendering as things grow and decay inside it, from a spot the player
+     left long ago.
+
+     The two populations are cleanly separated in this log. Splitting each
+     chunk's renders into visits at a 5-minute gap gives 19,428 visits over
+     34,256 flat tiles, and 75% of those visits are a SINGLE render lasting
+     0-3s: a player passed through, the chunk drew once, done. The tail is the
+     other thing entirely -- p90 is 267s and p99 is 1,110s of continuous
+     re-rendering from one chunk.
+
+     So each point is marked with whether its chunk was already loaded. Keyed
+     per map type, because the five maps each render the same physical chunk
+     independently and would otherwise mark each other as repeats.
+     ======================================================================== */
+  var CHUNK_HOLD_MS = 300000;
+
+  function markFresh(pts, holdMs) {
+    var hold = holdMs === undefined ? CHUNK_HOLD_MS : holdMs;
+    var last = new Map();
+    for (var i = 0; i < pts.length; i++) {
+      var p = pts[i];
+      var k = p.map + "|" + Math.floor(p.x / 16) + "," + Math.floor(p.z / 16);
+      var prev = last.get(k);
+      p.fresh = prev === undefined || (p.ms - prev) > hold;
+      last.set(k, p.ms);
+    }
+    return pts;
   }
 
   function buildTracks(model, opts) {
@@ -375,7 +411,7 @@ window.DV = window.DV || {};
 
            Trimming the span to 5-95% is worse (106 blocks), not better -- the
            extreme points are exactly the ones that pin the disc edge. */
-        var chunks = new Map(), maps = {};
+        var chunks = new Map(), fresh = new Map(), maps = {};
         var sw = 0;
         var minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
         for (var k = 0; k < grp.length; k++) {
@@ -384,7 +420,9 @@ window.DV = window.DV || {};
           if (grp[k].x > maxX) maxX = grp[k].x;
           if (grp[k].z < minZ) minZ = grp[k].z;
           if (grp[k].z > maxZ) maxZ = grp[k].z;
-          chunks.set(Math.floor(grp[k].x / 16) + "," + Math.floor(grp[k].z / 16), true);
+          var ck = Math.floor(grp[k].x / 16) + "," + Math.floor(grp[k].z / 16);
+          chunks.set(ck, true);
+          if (grp[k].fresh) fresh.set(ck, true);
           maps[grp[k].map] = (maps[grp[k].map] || 0) + 1;
         }
         var cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
@@ -393,6 +431,9 @@ window.DV = window.DV || {};
         nodes.push({
           ms: sliceStart + sliceMs / 2, cx: cx, cz: cz,      // WORLD blocks
           tiles: grp.length, chunks: chunks.size, maps: maps,
+          // Chunks that went from unloaded to loaded here -- the moving edge of
+          // somebody's view distance, as opposed to ground already held open.
+          frontier: fresh.size, chunkKeys: Array.from(chunks.keys()),
           radius: grp.length ? rad / grp.length : 0,          // blocks
           /* NOT the formal sqrt(1/sum-weights): that says 2 blocks with fifteen
              8-block tiles, while the three known positions of the calibration
@@ -421,6 +462,10 @@ window.DV = window.DV || {};
     }
     flushSlice();
 
+    /* ---- 1b. throw out the ground that is merely being held open ------- */
+    var held = findHeldSites(nodes, clusterRadius, opts, sliceMs);
+    nodes = held.nodes;
+
     /* ---- 2. link centroids across slices into tracks ------------------- */
     var open = [], done = [], nextId = 1;
     for (var n = 0; n < nodes.length; n++) {
@@ -437,6 +482,13 @@ window.DV = window.DV || {};
       }
       var best = null, bestD = Infinity;
       for (k2 = 0; k2 < open.length; k2++) {
+        /* Held ground never joins a journey. Without this the linker happily
+           steps farm -> player -> farm, which is where the 1,100-block minute
+           legs came from: it is not that the gate was too loose, it is that one
+           of the two endpoints was never a person. A held track may only extend
+           itself, and only within its own site. */
+        if (!!open[k2].held !== !!nd.held) continue;
+        if (nd.held && open[k2].episode !== nd.episode) continue;
         var elapsed = Math.max(1, (nd.ms - open[k2].lastMs) / sliceMs);
         var d = Math.hypot(nd.cx - open[k2].lastTx, nd.cz - open[k2].lastTz);
         if (d <= maxStep * elapsed && d < bestD) { bestD = d; best = open[k2]; }
@@ -444,7 +496,8 @@ window.DV = window.DV || {};
       if (!best) {
         best = { id: nextId++, points: [], startMs: nd.ms, lastMs: nd.ms,
                  lastTx: nd.cx, lastTz: nd.cz, minTx: nd.cx, maxTx: nd.cx,
-                 minTz: nd.cz, maxTz: nd.cz, dist: 0, chunks: 0 };
+                 minTz: nd.cz, maxTz: nd.cz, dist: 0, chunks: 0,
+                 held: !!nd.held, episode: nd.episode, site: nd.site };
         open.push(best);
       } else {
         best.dist += bestD;
@@ -487,6 +540,8 @@ window.DV = window.DV || {};
       for (var a2 = 0; a2 < done.length; a2++) {
         for (var b2 = a2 + 1; b2 < done.length; b2++) {
           var A = done[a2], B = done[b2];
+          // Same rule as the linker: held ground and a player are not one thing.
+          if (!!A.held !== !!B.held) continue;
           var overlap = Math.min(A.lastMs, B.lastMs) - Math.max(A.startMs, B.startMs);
           if (overlap <= 0) continue;
           var pa = meanPos(A), pb = meanPos(B);
@@ -548,55 +603,288 @@ window.DV = window.DV || {};
       tr.points.forEach(function (p) { rsum += (p.radius || 0); });
       tr.loadRadiusBlocks = Math.round(rsum / tr.points.length);
       tr.speedBlocksPerSec = tr.durationMs > 0 ? tr.blocksTravelled / (tr.durationMs / 1000) : 0;
-
-      /* Attribution, only where the roster permits it. One player online for the
-         whole track means the track is theirs; more than one means we can name
-         the candidates but not choose between them. */
-      var names = new Map(), soloAll = true;
-      tr.points.forEach(function (p) {
-        if (p.online !== 1) soloAll = false;
-        (p.roster || []).forEach(function (n) { names.set(n, (names.get(n) || 0) + 1); });
-      });
-      tr.candidates = Array.from(names.entries())
-        .sort(function (a, b) { return b[1] - a[1]; })
-        .map(function (e) { return e[0]; });
-      tr.player = (soloAll && tr.candidates.length === 1) ? tr.candidates[0] : null;
-      tr.confident = !!tr.player;
     });
-    /* SECOND TIER: attribution by timing. A player's loads start shortly after
-       they join -- measured on the calibration session, the first cluster load
-       came 51s and 73s after the two joins -- so a track that begins inside a
-       few minutes of exactly one join very probably belongs to that joiner.
-       Each join can spawn only one track (consumed in start order), the name
-       must actually appear in the track's roster window, and the result is
-       marked uncertain: timing is evidence, not proof. */
-    tracks.sort(function (a, b) { return a.startMs - b.startMs; });
-    var joins = (model.transitions || []).filter(function (t) { return t.type === "join"; });
-    var usedJoin = new Set();
-    tracks.forEach(function (tr) {
-      if (tr.player) return;
-      var cands = [];
-      for (var j = 0; j < joins.length; j++) {
-        if (usedJoin.has(j)) continue;
-        var J = joins[j];
-        // start may precede the join by up to half a slice (midpoint timestamps)
-        if (tr.startMs >= J.ms - sliceMs * 0.75 && tr.startMs <= J.ms + 240000 &&
-            tr.candidates.indexOf(J.player) >= 0) {
-          cands.push(j);
-        }
-      }
-      if (cands.length === 1) {
-        usedJoin.add(cands[0]);
-        tr.player = joins[cands[0]].player;
-        tr.confident = false;
-        tr.attribution = "join-timing (+" +
-          Math.max(0, Math.round((tr.startMs - joins[cands[0]].ms) / 1000)) + "s after their join)";
-      }
-    });
+    attributeTracks(tracks, model, opts, sliceMs);
 
     // Label every leg and lift the impossible ones out as events.
     tracks.forEach(function (tr) { annotateTrack(tr, model, opts); });
+    /* Carried on the array rather than wrapped in an object: every caller
+       already treats the return value as the track list. */
+    tracks.heldSites = held.sites;
+    tracks.sites = held.allSites;
     return tracks;
+  }
+
+  /* ==========================================================================
+     WHOSE TRACK IS IT -- BY ELIMINATION, AND AFTER THE FACT
+     --------------------------------------------------------------------------
+     The old rule was "one player online for the whole track, and exactly one
+     name in the roster". That answers almost nothing on a server that usually
+     has three or four people on: it named 27 of 417 tracks confidently.
+
+     Two things it was throwing away.
+
+     FIRST, absence is evidence. The candidate list was the UNION of every name
+     seen anywhere along the track, which lets someone who logged in halfway
+     through own a path that started before they arrived. Take the intersection
+     instead: a player can only own a track they were online for at every point
+     of. That one change eliminates most candidates outright.
+
+     SECOND, and this is the user's: the answer usually arrives late. While
+     three people are on there may be nothing to separate them, and the track
+     may well be attributed wrongly or not at all. Then someone leaves -- and
+     the leave is a hard, clean edge. Any track still producing points after it
+     is not theirs; a track that stops right at it very likely is. So this runs
+     over the WHOLE window and works backwards from the edges, rather than
+     deciding as it goes.
+
+     Elimination then propagates, because a person is in one place at a time: as
+     soon as a track is pinned to someone, every other track overlapping it in
+     time loses that name, which can leave a neighbour with a single candidate,
+     and so on to a fixed point. That is how a busy evening resolves -- not from
+     the middle, but inward from whoever left first.
+
+     Held ground takes no name at all. It is not a person, and letting it
+     consume a candidate would push a real track onto the wrong player.
+     ======================================================================== */
+
+  /* How close a track's end has to sit to a leave before the two are treated as
+     the same event. Generous, because loading stops when the player stops
+     moving, not when they disconnect -- someone can stand still for minutes
+     before logging out. This only ever ADDS evidence; it never eliminates. */
+  var EDGE_WINDOW_MS = 300000;
+
+  function attributeTracks(tracks, model, opts, sliceMs) {
+    opts = opts || {};
+    var edge = opts.edgeWindowMs === undefined ? EDGE_WINDOW_MS : opts.edgeWindowMs;
+    var snaps = model.snapshots || [];
+    var free = [];
+
+    /* Viability is decided against each player's ONLINE INTERVAL, not by
+       intersecting the rosters attached to the track's points. Point-wise
+       intersection looked equivalent and was not: a track's first slice
+       midpoint routinely lands a few seconds before the join it belongs to --
+       tile times are shifted back by the render-queue delay, and a slice is
+       stamped at its middle -- so the roster there is empty and the
+       intersection eliminates everybody. On the calibration session it left
+       every candidate set empty and the harness placed 0 of 11 points.
+
+       Intervals also say the thing we actually mean: was this person online for
+       the whole stretch the track covers. */
+    var spans = onlineSpans(snaps);
+    var slack = sliceMs;                     // one slice of edge slop, both ends
+    tracks.forEach(function (tr) {
+      tr.candidates = []; tr.viable = []; tr.player = null; tr.confident = false;
+      tr.attribution = "";
+      if (tr.held) return;                       // a place, not a person
+      free.push(tr);
+
+      var lo = tr.startMs + slack, hi = tr.lastMs - slack;
+      if (lo > hi) { lo = hi = (tr.startMs + tr.lastMs) / 2; }
+      var seen = new Map();
+      tr.points.forEach(function (p) {
+        var s = M.atOrBefore(snaps, p.ms);
+        if (!s) return;
+        for (var i = 0; i < s.roster.length; i++) seen.set(s.roster[i], (seen.get(s.roster[i]) || 0) + 1);
+      });
+      tr.candidates = Array.from(seen.entries())
+        .sort(function (a, b) { return b[1] - a[1]; })
+        .map(function (e) { return e[0]; });
+      tr.viable = tr.candidates.filter(function (nm) {
+        var list = spans.get(nm) || [];
+        for (var i = 0; i < list.length; i++) if (list[i][0] <= lo && list[i][1] >= hi) return true;
+        return false;
+      });
+      /* Nobody covers the whole span. That happens where the roster itself is
+         unreliable (a capped sample, a ping outage mid-track), and eliminating
+         everyone would be reading a hole in the data as a fact about people. */
+      if (!tr.viable.length) tr.viable = tr.candidates.slice();
+    });
+
+    /* ---- the hard edges: joins and leaves -------------------------------- */
+    var trans = model.transitions || [];
+    function edgeNames(type, ms, before) {
+      var out = [];
+      for (var i = 0; i < trans.length; i++) {
+        var t = trans[i];
+        if (t.type !== type) continue;
+        // A track's timestamps are slice midpoints, so allow half a slice either
+        // way on top of the window.
+        var lo = before ? t.ms - edge : t.ms - sliceMs * 0.75;
+        var hi = before ? t.ms + sliceMs * 0.75 : t.ms + edge;
+        if (ms >= lo && ms <= hi) out.push({ player: t.player, uncertain: t.uncertain, ms: t.ms });
+      }
+      return out;
+    }
+    free.forEach(function (tr) {
+      tr.startsAtJoin = edgeNames("join", tr.startMs, false);
+      tr.endsAtLeave = edgeNames("leave", tr.lastMs, true);
+    });
+
+    /* ---- assign, then propagate the exclusion ---------------------------- */
+    function overlap(a, b) {
+      return Math.min(a.lastMs, b.lastMs) >= Math.max(a.startMs, b.startMs);
+    }
+    /* Would this name have to be in two places at once?
+
+       Elimination is only as good as its premise, which is that everyone online
+       is loading overworld chunks somewhere. Someone in the nether is not, so
+       their share of the overworld goes unclaimed and the argument "nobody else
+       is left, so it must be them" hands it to whoever happens to be missing --
+       which is exactly the person who cannot have made it. Caught by the
+       calibration: bigboytrain360 stepped into a portal at 14:38 and came out
+       at Jaune four minutes later, and the leftover track 6,441 blocks away was
+       confidently assigned to them.
+
+       So the weaker rules have to answer for the geometry: a name is only
+       accepted if getting there from wherever we already put them is possible
+       at all. The threshold is the one MODES already calls impossible on foot;
+       what falls out is left unattributed rather than guessed, and linkEvents
+       still surfaces the jump for anyone reading it. */
+    var maxBps = opts.maxAttributionBps === undefined ? 80 : opts.maxAttributionBps;
+    function reachable(tr, name) {
+      for (var i = 0; i < free.length; i++) {
+        var u = free[i];
+        if (u === tr || u.player !== name || !u.points.length) continue;
+        var gapMs, d;
+        if (u.lastMs <= tr.startMs) {
+          gapMs = tr.startMs - u.lastMs;
+          d = Math.hypot(tr.points[0].tx - u.lastTx, tr.points[0].tz - u.lastTz);
+        } else if (u.startMs >= tr.lastMs) {
+          gapMs = u.startMs - tr.lastMs;
+          d = Math.hypot(u.points[0].tx - tr.lastTx, u.points[0].tz - tr.lastTz);
+        } else {
+          return false;                       // overlapping in time: one person, one place
+        }
+        if (d / Math.max(1, gapMs / 1000) > maxBps) return false;
+      }
+      return true;
+    }
+
+    function assign(tr, name, how, confident) {
+      tr.player = name;
+      tr.confident = !!confident;
+      tr.attribution = how;
+      /* One person, one place. Every other track running at the same time just
+         lost this candidate -- which is what turns a single certainty into a
+         chain of them. */
+      for (var i = 0; i < free.length; i++) {
+        var u = free[i];
+        if (u === tr || u.player) continue;
+        if (!overlap(tr, u)) continue;
+        var k = u.viable.indexOf(name);
+        if (k >= 0) u.viable.splice(k, 1);
+      }
+    }
+
+    /* One round can only resolve so much, and every resolution can unlock
+       another, so the cap has to scale with the work rather than be a round
+       number. At 20 it silently starved: the edge rule assigns at most a few
+       tracks per round and a four-day log has hundreds, so most of the log
+       never got its turn -- the calibration session's own track sat there with
+       a single matching leave, unclaimed. */
+    var changed = true, rounds = 0, maxRounds = free.length + 20;
+    while (changed && rounds++ < maxRounds) {
+      changed = false;
+
+      // (a) one candidate left standing
+      for (var i = 0; i < free.length; i++) {
+        var tr = free[i];
+        if (tr.player || tr.viable.length !== 1) continue;
+        assign(tr, tr.viable[0],
+          tr.candidates.length === 1
+            ? "the only player online for the whole track"
+            : "the only candidate left once the others were ruled out", true);
+        changed = true;
+      }
+      if (changed) continue;
+
+      /* (b) the edges. A track that stops exactly when someone leaves, and only
+         one of its candidates left then, is theirs -- this is the case that only
+         becomes decidable after the fact, which is the whole reason this pass
+         runs over the finished window rather than as tracks are built. */
+      for (i = 0; i < free.length; i++) {
+        tr = free[i];
+        if (tr.player) continue;
+        var hit = edgeMatch(tr.endsAtLeave, tr.viable);
+        if (hit && !reachable(tr, hit.player)) hit = null;
+        if (hit) {
+          assign(tr, hit.player, "ends when " + hit.player + " left" +
+            (hit.uncertain ? " (a leave the roster is not sure of)" : ""), false);
+          changed = true;
+          continue;
+        }
+        hit = edgeMatch(tr.startsAtJoin, tr.viable);
+        if (hit && !reachable(tr, hit.player)) hit = null;
+        if (hit) {
+          assign(tr, hit.player, "starts " +
+            Math.max(0, Math.round((tr.startMs - hit.ms) / 1000)) + "s after " + hit.player + " joined" +
+            (hit.uncertain ? " (a join the roster is not sure of)" : ""), false);
+          changed = true;
+        }
+      }
+      if (changed) continue;
+
+      /* (c) from the player's side. If someone is a candidate on exactly one
+         unclaimed track anywhere in the window, that track is theirs: they were
+         online and they loaded chunks somewhere. */
+      var byName = new Map();
+      for (i = 0; i < free.length; i++) {
+        if (free[i].player) continue;
+        for (var j = 0; j < free[i].viable.length; j++) {
+          var nm = free[i].viable[j];
+          if (!byName.has(nm)) byName.set(nm, []);
+          byName.get(nm).push(free[i]);
+        }
+      }
+      byName.forEach(function (list, nm) {
+        if (changed || list.length !== 1) return;
+        if (list[0].player || !reachable(list[0], nm)) return;
+        assign(list[0], nm, "the only track " + nm + " could have made while they were online", false);
+        changed = true;
+      });
+    }
+
+    /* Ordering is a presentation detail, but it is also what makes the two
+       feeds line up: the panel and the map both walk this list. */
+    tracks.sort(function (a, b) { return a.startMs - b.startMs; });
+    return tracks;
+  }
+
+  /* Every stretch each player was continuously online, from the snapshots.
+     A truncated sample (the server capping its name list) is not a disconnect,
+     so it never closes a span -- treating it as one chopped long sessions into
+     dozens of fragments, none of which covered any track. */
+  function onlineSpans(snaps) {
+    var open = new Map(), out = new Map();
+    function close(name, endMs) {
+      if (!out.has(name)) out.set(name, []);
+      out.get(name).push([open.get(name), endMs]);
+      open.delete(name);
+    }
+    for (var i = 0; i < snaps.length; i++) {
+      var s = snaps[i], now = new Set(s.roster);
+      if (!s.truncated) {
+        Array.from(open.keys()).forEach(function (nm) { if (!now.has(nm)) close(nm, s.ms); });
+      }
+      now.forEach(function (nm) { if (!open.has(nm)) open.set(nm, s.ms); });
+    }
+    // Still listed in the last snapshot: still online, so the span has no end.
+    Array.from(open.keys()).forEach(function (nm) { close(nm, Infinity); });
+    return out;
+  }
+
+  /* Exactly one of the edge's names is still viable -> that is the answer. Two
+     is a coincidence we cannot resolve and zero is no evidence at all; both are
+     left alone rather than guessed at. */
+  function edgeMatch(edges, viable) {
+    var hit = null;
+    for (var i = 0; i < (edges || []).length; i++) {
+      if (viable.indexOf(edges[i].player) < 0) continue;
+      if (hit && hit.player !== edges[i].player) return null;
+      if (!hit) hit = edges[i];
+    }
+    return hit;
   }
 
   /* Single-linkage grouping within one time slice. Cheap (slices hold a handful
@@ -622,6 +910,231 @@ window.DV = window.DV || {};
       }
     }
     return groups;
+  }
+
+  /* ==========================================================================
+     CHUNK LOADERS, AND WHY THE ROSTER IS ENOUGH TO FIND THEM
+     --------------------------------------------------------------------------
+     A chunk loader (or spawn chunks, or any farm someone left running) keeps a
+     patch of world loaded with nobody near it, so it renders forever from a
+     fixed spot. Those renders are indistinguishable from a stationary player
+     LOCALLY -- and that is what was wrecking the tracks: one player online, two
+     places rendering, and the linker dutifully walking a path back and forth
+     between them every minute.
+
+     The observation that settles it, and it is the user's: a loader cannot
+     switch itself on. Something has to load it once, and after that it stays
+     up whether anyone is there or not. So within a stretch of log:
+
+       * a patch that is only active for PART of a session, discovering chunks
+         it has not seen before, is a player -- they arrived and left;
+       * a patch still going while the fresh loading is demonstrably somewhere
+         else, when only one person is online, is being held open. It cannot be
+         the player, because the player is over there.
+
+     Counting is what makes it falsifiable: if a slice has more active places
+     than the server has people, the surplus is not people. Rank the places by
+     how much NEW ground each is loading and the surplus is the ones re-drawing
+     chunks they already had.
+
+     Worked example, 2026-07-27, blocdac alone from 12:04 to 13:03:
+
+       (3900,-2900)   88 renders over 22 chunks (4.0 each) spread across the
+                      whole 54 minutes -- a base, held open
+       (4020,-4020)   63 renders over 34 chunks (1.9 each) in two bursts
+       (3100,-3800)   33 renders over 30 chunks (1.1 each) inside 3 minutes
+       (-3300,5100)   186 renders over 133 chunks (1.4 each) in 10 minutes,
+                      the pale-oak forest -- someone walking through it
+
+     The first is a holder and the rest are a player moving. Before this, the
+     model read all four as one person and drew 7,600 blocks of imaginary
+     pacing; the tracks in that hour travelled 800-2,200 blocks each without
+     leaving a 200-block box.
+
+     ONCE HELD, ALWAYS HELD -- retroactively. The evidence usually arrives after
+     the fact: at 12:04 there is nothing to compare (3900,-2900) against, and
+     only at 12:23, when the player turns up 1,100 blocks away, does the first
+     twenty minutes become interpretable. So the votes are counted over the
+     whole window first and applied backwards, which is the only ordering that
+     uses what the log actually knows.
+
+     WHAT IS KEPT. The activation itself: a loader had to be loaded by someone,
+     so the first couple of slices at a site are a real visit and stay. It is
+     the sustained afterwards that is thrown out.
+     ======================================================================== */
+
+  /* How far apart two active patches have to be before the roster argument can
+     be made at all. One player's loads sit a median 86 blocks from their centre
+     and the disc wanders another hundred or so between slices, so anything
+     inside a few hundred blocks is one person and the merge pass downstream
+     will fold it. 512 is well outside that, and the contradiction it flags --
+     two places, one player -- is then a real one. Voting at the 176-block
+     clustering radius instead accused players of being their own chunk loaders:
+     it condemned the pale-oak sweep's own trailing fragment. */
+  var SITE_SEPARATION = 512;
+  /* A site has to be RE-drawing ground it already holds before "held" is even on
+     the table, whatever the roster says. Measured on the 2026-07-27 sessions,
+     renders per distinct chunk separates the two populations without ambiguity:
+
+         (3900,-2900)  4.0   base held open all session
+         (650,-1700)   3.1   base, occupied
+         (4020,-4020)  1.9   player, two visits
+         (-3300,5100)  1.4   player walking through the pale-oak forest
+         (3100,-3800)  1.1   player crossing at speed
+
+     Below 2 the site is mostly discovering new ground, which no chunk loader
+     does -- a loader's chunks are already loaded, that is the entire point. This
+     guard is what stops a long exploration session being demoted because it
+     happened to be the quieter of two places for a couple of minutes. */
+  var HELD_REPEAT_RATE = 2.0;
+  /* How many separate slices have to say so. One slice is a coincidence --
+     two players can trade places for a minute. Repetition is not. */
+  var HELD_MIN_VOTES = 2;
+  /* A site is judged per VISIT, not once for all time, and this is the quiet
+     gap that ends a visit.
+
+     Getting this wrong is not a tuning detail, it is the difference between
+     the feature working and destroying the data. Judged globally, a place
+     someone has stood in for four days accumulates a vote sooner or later --
+     one busy evening where it was the quieter of two places is enough -- and
+     the verdict then reaches back and demotes every visit they ever made to
+     their own base. That is what happened: the whole-log build classified the
+     calibration site as held ground and the harness went from placing 9 of 11
+     ground-truth points to 0.
+
+     Per visit, the same site can be a player on Saturday and a machine left
+     running on Sunday, which is what it actually is. 15 minutes: long enough
+     that a lull in a session does not split it, short enough that two visits a
+     day apart are never one. */
+  var EPISODE_GAP_MS = 900000;
+
+  function findHeldSites(nodes, radius, opts, sliceMs) {
+    opts = opts || {};
+    if (opts.heldSites === false) return { nodes: nodes, sites: [] };
+    var minVotes = opts.heldMinVotes === undefined ? HELD_MIN_VOTES : opts.heldMinVotes;
+    var repeat = opts.heldRepeatRate === undefined ? HELD_REPEAT_RATE : opts.heldRepeatRate;
+    var sep = opts.siteSeparation === undefined ? SITE_SEPARATION : opts.siteSeparation;
+    var episodeGap = opts.episodeGapMs === undefined ? EPISODE_GAP_MS : opts.episodeGapMs;
+    var activationMs = opts.activationMs === undefined ? sliceMs * 2 : opts.activationMs;
+
+    /* ---- a site is a place that keeps being active, across slices --------
+       Nearest-centre assignment rather than single linkage: over days of log,
+       linkage chains one busy area into the next until the whole inhabited
+       half of the map is one "site" and nothing can be compared to anything. */
+    var sites = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var nd = nodes[i], best = null, bestD = sep / 2;
+      for (var s = 0; s < sites.length; s++) {
+        var d = Math.hypot(nd.cx - sites[s].cx, nd.cz - sites[s].cz);
+        if (d <= bestD) { bestD = d; best = sites[s]; }
+      }
+      if (!best) {
+        best = { id: sites.length + 1, cx: nd.cx, cz: nd.cz, n: 0,
+                 firstMs: nd.ms, lastMs: nd.ms, episodes: [] };
+        sites.push(best);
+      }
+      best.n++;
+      best.cx += (nd.cx - best.cx) / best.n;      // running mean
+      best.cz += (nd.cz - best.cz) / best.n;
+      if (nd.ms < best.firstMs) best.firstMs = nd.ms;
+      if (nd.ms > best.lastMs) best.lastMs = nd.ms;
+      nd.site = best;
+
+      /* ---- and which VISIT to the site this is ----------------------------
+         Nodes arrive in time order, so the open episode is always the last one. */
+      var ep = best.episodes[best.episodes.length - 1];
+      if (!ep || nd.ms - ep.lastMs > episodeGap) {
+        ep = { site: best, cx: nd.cx, cz: nd.cz, n: 0, renders: 0, chunkSet: new Set(),
+               firstMs: nd.ms, lastMs: nd.ms, votes: 0, frontier: 0, held: false };
+        best.episodes.push(ep);
+      }
+      ep.n++;
+      ep.renders += nd.tiles;
+      ep.frontier += nd.frontier;
+      for (var c = 0; c < nd.chunkKeys.length; c++) ep.chunkSet.add(nd.chunkKeys[c]);
+      ep.cx += (nd.cx - ep.cx) / ep.n;
+      ep.cz += (nd.cz - ep.cz) / ep.n;
+      ep.lastMs = nd.ms;
+      nd.episode = ep;
+    }
+    var episodes = [];
+    for (s = 0; s < sites.length; s++) {
+      for (var e = 0; e < sites[s].episodes.length; e++) {
+        var epi = sites[s].episodes[e];
+        epi.chunks = epi.chunkSet.size;
+        epi.repeatRate = epi.renders / Math.max(1, epi.chunks);
+        epi.chunkSet = null;                       // done with it; do not retain
+        episodes.push(epi);
+      }
+    }
+
+    /* ---- more places than people: the surplus is not people ------------- */
+    var bySlice = new Map();
+    for (i = 0; i < nodes.length; i++) {
+      if (!bySlice.has(nodes[i].ms)) bySlice.set(nodes[i].ms, []);
+      bySlice.get(nodes[i].ms).push(nodes[i]);
+    }
+    bySlice.forEach(function (grp) {
+      /* By SITE, not by node. One player's disc regularly fragments into two or
+         three nodes in a slice (that is what the merge pass downstream is for),
+         and counting those fragments as separate places would accuse a player
+         of being their own chunk loader. */
+      var perSite = new Map();
+      for (var j = 0; j < grp.length; j++) {
+        var st = grp[j].site, pe = perSite.get(st);
+        if (!pe) { pe = { site: st, episode: grp[j].episode, frontier: 0 }; perSite.set(st, pe); }
+        pe.frontier += grp[j].frontier;
+      }
+      var places = Array.from(perSite.values());
+      /* The roster is the constraint. A null count (before the first player
+         snapshot) is not evidence of an empty server, and a zero count still
+         has to allow one place -- the render queue drains for a minute or so
+         after the last player leaves. */
+      var online = grp[0].online;
+      var allow = Math.max(1, online === null || online === undefined ? 1 : online);
+      if (places.length <= allow) return;
+      places.sort(function (a, b) {
+        // most new ground first; tie-break toward the visit that only just
+        // started, since a holder by definition has been going a while
+        return b.frontier - a.frontier || b.episode.firstMs - a.episode.firstMs;
+      });
+      /* Everything past the head-count loses. No margin is demanded on the
+         frontier counts themselves: at 60s slices a place contributes one to
+         four new chunks and the two candidates are routinely tied, so requiring
+         the loser to be clearly quieter (an earlier version wanted half) meant
+         the vote almost never fired -- the (3900,-2900) base scored zero votes
+         across the very hour it was demonstrably holding itself open. The tie
+         is broken on age instead, which is the actual physics: whichever place
+         has been going longer is the one that had time to be switched on. What
+         keeps this from condemning quiet players is the repeat-rate gate below,
+         not the margin. */
+      for (j = allow; j < places.length; j++) places[j].episode.votes++;
+    });
+
+    var heldSites = [];
+    for (i = 0; i < episodes.length; i++) {
+      if (episodes[i].votes >= minVotes && episodes[i].repeatRate >= repeat) {
+        episodes[i].held = true; heldSites.push(episodes[i]);
+      }
+    }
+
+    /* ---- apply it, backwards over the whole window ----------------------
+       MARKED, NOT DELETED. Deleting held nodes outright was the first attempt
+       and it threw away something real: a site being held means its renders do
+       not prove anyone is standing there, not that nothing happened. What has
+       to stop is the LINKING -- a path that steps from a farm to a player and
+       back every minute is the fiction. So held nodes stay, and the linker
+       below refuses to join them to anything but their own site, which leaves
+       them as a stationary blob at a fixed place instead of a leg of somebody's
+       journey. */
+    for (i = 0; i < nodes.length; i++) {
+      var n2 = nodes[i];
+      if (!n2.episode.held) continue;
+      // The visit that switched it on is real; everything after is the machine.
+      if (n2.ms <= n2.episode.firstMs + activationMs) n2.activation = true;
+      else n2.held = true;
+    }
+    return { nodes: nodes, sites: heldSites, allSites: episodes };
   }
 
   /* ==========================================================================
@@ -664,6 +1177,8 @@ window.DV = window.DV || {};
   // Not a speed band: assigned when loading stopped long enough that we simply
   // did not observe the movement, however ordinary it may have been.
   var UNOBSERVED = { name: "unobserved", note: "no loads for a while -- they were still, elsewhere, or in another dimension" };
+  // Also not a speed band: ground held loaded by something other than presence.
+  var HELD = { name: "held", note: "a place being kept loaded -- renders here locate the loader, not a player" };
 
   function classifySpeed(bps) {
     for (var i = 0; i < MODES.length; i++) if (bps < MODES[i].max) return MODES[i].name;
@@ -683,6 +1198,22 @@ window.DV = window.DV || {};
     var gapMs = opts.stationaryGapMs === undefined ? Math.max(45000, slice * 1.75) : opts.stationaryGapMs;
     var portals = opts.portals || null;
     var legs = [], events = [], modeTime = {};
+
+    /* Ground someone is holding open. The renders wander a couple of hundred
+       blocks around the site as different corners of it tick, and reading that
+       wander as walking is exactly the mistake this whole pass exists to stop.
+       One mode, no speeds, no events. */
+    if (tr.held) {
+      for (var h = 1; h < tr.points.length; h++) {
+        var dth = (tr.points[h].ms - tr.points[h - 1].ms) / 1000;
+        legs.push({ ms: tr.points[h - 1].ms, mode: "held", bps: 0, blocks: 0 });
+        modeTime.held = (modeTime.held || 0) + Math.max(0, dth);
+      }
+      tr.legs = legs; tr.events = []; tr.modeTime = modeTime;
+      tr.dominantMode = "held"; tr.movingSec = 0;
+      tr.blocksTravelled = 0;
+      return tr;
+    }
 
     for (var i = 1; i < tr.points.length; i++) {
       var a = tr.points[i - 1], b = tr.points[i];
@@ -774,7 +1305,11 @@ window.DV = window.DV || {};
     var portals = opts.portals || null;
     var out = [];
 
-    var byStart = tracks.slice().sort(function (a, b) { return a.startMs - b.startMs; });
+    /* Held ground has no arrivals and no departures: nobody travelled to or
+       from it, it was simply switched on. Pairing it up manufactures teleports
+       between a farm and whoever happened to be moving next. */
+    var byStart = tracks.filter(function (t) { return !t.held; })
+                        .sort(function (a, b) { return a.startMs - b.startMs; });
     for (var i = 0; i < byStart.length; i++) {
       var a = byStart[i];
       var best = null;

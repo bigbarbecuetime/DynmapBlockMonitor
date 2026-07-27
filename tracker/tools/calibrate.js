@@ -147,7 +147,9 @@ function buildAt(DV, raw, params) {
   const r = DV.infer.buildTracks(model, {
     from, to, mapConfigs: raw.maps,
     sliceMs: params.sliceMs,
-    clusterRadius: params.clusterRadius
+    clusterRadius: params.clusterRadius,
+    // HELD=0 turns the chunk-loader pass off, for a before/after on one dataset.
+    heldSites: process.env.HELD !== "0"
   });
   return { model, tracks: Array.isArray(r) ? r : (r.tracks || []) };
 }

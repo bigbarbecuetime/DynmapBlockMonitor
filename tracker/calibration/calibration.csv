@@ -6,3 +6,7 @@ time,player,x,y,z,activity,radius,note
 2026-07-25T22:09:22Z,bigboytrain360,2157,63,-4786,standing,0,stood here until leaving
 2026-07-26T19:47:05Z,bigboytrain360,2130.0,64.0,-4921.0,mining,20.0,"broke a line 2130,64,-4901 to 2130,63,-4941; tile 266,616 rendered 19:48:16Z, minus the 71s render delay lands inside the 19:05:58-19:47:20 session"
 2026-07-27T01:44:19Z,bigboytrain360,2130.0,64.0,-4921.0,building,20.0,"replaced the same line; renders 01:45:30-01:46:17 on tiles 266,612/614/616"
+2026-07-27T14:36:01Z,bigboytrain360,2142.0,65.0,-4751.0,standing,0.0,Spawned when rejoin here
+2026-07-27T14:37:24Z,bigboytrain360,2142.0,65.0,-4751.0,running,0.0,"Running north along the gravel road, then left into the portal room"
+2026-07-27T14:38:28Z,bigboytrain360,2123.0,63.0,-4843.0,portal,0.0,Entering nether portal
+2026-07-27T14:42:37Z,bigboytrain360,540.0,64.0,-34.0,portal,0.0,"Exited at ""Jaune"" nether portal"

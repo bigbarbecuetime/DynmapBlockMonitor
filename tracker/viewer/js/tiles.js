@@ -653,6 +653,12 @@ window.DV = window.DV || {};
         var pts = tr.points.filter(function (p) { return p.ms <= state.cursor; });
         if (pts.length < 2) continue;
         var isSel = state.selectedTrack === tr.id;
+        /* HELD GROUND IS NOT A PATH. Somewhere kept loaded re-renders whichever
+           corner of itself ticked next, so joining those points draws a scribble
+           that reads as a person pacing -- which is precisely the thing that
+           made the tracks look uncorrelated. Draw the place instead: one ring
+           at the middle of everything it touched, and no line at all. */
+        if (tr.held) { drawHeldGround(tr, pts, col, isSel); continue; }
         ctx.strokeStyle = col;
         ctx.lineWidth = isSel ? 4 : 2;
         // Unattributed tracks recede; the selected one is pulled forward.
@@ -700,6 +706,44 @@ window.DV = window.DV || {};
           var label = tr.player + (age > 90000 ? "  · " + M.fmtDur(age) + " ago" : "");
           ctx.fillText(label, last.x, last.y - 8);
         }
+      }
+      ctx.restore();
+    }
+
+    /* A place someone left running. Drawn as the extent it covers, dashed and
+       unfilled so it never competes with a player track, and deliberately in the
+       muted ink rather than a player colour -- nobody owns it. */
+    function drawHeldGround(tr, pts, col, isSel) {
+      var minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (var j = 0; j < pts.length; j++) {
+        if (pts[j].tx < minX) minX = pts[j].tx;
+        if (pts[j].tx > maxX) maxX = pts[j].tx;
+        if (pts[j].tz < minZ) minZ = pts[j].tz;
+        if (pts[j].tz > maxZ) maxZ = pts[j].tz;
+      }
+      var c = worldToScreen((minX + maxX) / 2, (minZ + maxZ) / 2, 64);
+      var edge = worldToScreen((minX + maxX) / 2 + Math.max(48, (maxX - minX) / 2),
+                               (minZ + maxZ) / 2, 64);
+      var rpx = Math.min(300, Math.abs(edge.x - c.x));
+      ctx.save();
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = isSel ? 2.5 : 1.5;
+      ctx.globalAlpha = isSel ? 0.95 : 0.55;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, Math.max(4, rpx), 0, 6.2832);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(c.x - 4, c.y); ctx.lineTo(c.x + 4, c.y);
+      ctx.moveTo(c.x, c.y - 4); ctx.lineTo(c.x, c.y + 4);
+      ctx.stroke();
+      if (state.scale >= 1.5) {
+        ctx.font = "10px system-ui, -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.globalAlpha = 0.8;
+        ctx.fillStyle = pal.text1;
+        ctx.fillText("held loaded", c.x, c.y - Math.max(4, rpx) - 4);
       }
       ctx.restore();
     }

@@ -248,12 +248,61 @@ matters: tile linking hops across the disc and inflated speed to 3.8–8.5
 blocks/s, while per-slice estimates give 2.2 median / 3.3 p90 — matching the 2.2
 measured directly from the solo stretches.
 
-Attribution has two tiers. A track whose every moment had exactly one player
-online is **confidently** theirs. Otherwise, a track that starts within a few
-minutes of exactly one join is tagged with that joiner — measured on the
-calibration session, loads first appeared 51s and 73s after the two joins — with
-each join spawning at most one track, the name checked against the roster, and
-the result marked uncertain.
+**Held ground is separated out before anything is linked.** A chunk loader, a
+farm someone left running, or spawn chunks keep a patch of world loaded with
+nobody near it, and it renders forever from a fixed spot — locally
+indistinguishable from a stationary player. Untreated, that is what made tracks
+look uncorrelated: one person online, two places rendering, and the linker
+walking a path back and forth between them every minute.
+
+A loader cannot switch itself on, which is what makes it findable. Something has
+to load it once, and after that it stays up whether anyone is there or not. So
+if a 60-second slice holds more separated places (>512 blocks apart) than the
+server has people, the surplus is not people; rank the places by how many chunks
+each is loading *for the first time* and the loser is the one re-drawing ground
+it already had. Two such votes condemn a **visit** to a site — not the site
+forever, which would demote a player's own base across days, and did: it took
+the calibration harness from placing 9 of 11 ground-truth points to 0.
+
+The gate that keeps quiet players safe is renders per distinct chunk, which
+separates the two populations cleanly (2026-07-27 sessions):
+
+| place | renders / chunk | what it was |
+|---|---|---|
+| (3900,−2900) | 4.0 | a base held open all session |
+| (650,−1700) | 3.1 | a base, occupied |
+| (4020,−4020) | 1.9 | a player, two visits |
+| (−3300,5100) | 1.4 | a player walking through the pale-oak forest |
+| (3100,−3800) | 1.1 | a player crossing at speed |
+
+Below 2.0 a place is mostly discovering new ground, which no chunk loader does.
+Held visits keep their **activation** — the couple of slices that switched them
+on are a real person arriving — and the rest is drawn as a dashed ring where the
+place is, never joined into anyone's path. Over the whole log this cuts tracks
+that travel more than 4× their own extent from **20% to 11%**, and the worst
+offender from 22,853 blocks of pacing to 11,016, with no change to the
+ground-truth error.
+
+Attribution is by **elimination, worked backwards over the finished window**.
+Candidates are the players online for the *whole* span a track covers (compared
+against each player's online interval, not the roster attached to each point —
+a slice midpoint routinely lands seconds before the join it belongs to). Then,
+in rounds to a fixed point:
+
+1. a single remaining candidate is assigned, and confidently;
+2. a track that stops right at someone's leave, or starts right after their
+   join, when only one candidate matches that edge;
+3. a player who could only have made one unclaimed track gets it.
+
+Every assignment removes that name from every track overlapping it in time —
+one person is in one place — which is what lets a busy evening resolve inward
+from whoever left first. Rules 2 and 3 additionally check the geometry: a name
+is refused if it would have to travel faster than 80 blocks/s from wherever the
+model already put that player. That is the nether case, and the calibration
+caught it — someone stepped into a portal and the leftover overworld track 6,441
+blocks away was being confidently handed to them. Held ground takes no name at
+all; it is not a person, and letting it consume a candidate pushes a real track
+onto the wrong player.
 
 Linking is by proximity in space and time, never by the order tiles arrive: tiles
 come off the feed sorted by ascending x (perfectly ascending in **92%** of polls
@@ -261,9 +310,12 @@ come off the feed sorted by ascending x (perfectly ascending in **92%** of polls
 measures Dynmap's render loop, not player heading.
 
 The check is the roster: the number of live tracks should match the number of
-people online. It agrees exactly **55%** of the time (59% at a 30s slice), mean error 0.75
-players, and errs low — a player standing still loads nothing and is invisible
-here.
+people online. It agrees exactly **52%** of the time over the whole log (86% over
+the 2026-07-27 morning), errs low, and overcounts only **1%** of the time — a
+player standing still loads nothing and is invisible here, which is the failure
+worth having. `node tools/tracks.js [from] [to]` prints the tracks and this
+score; `HELD=0` turns the held-ground pass off for a before/after on one
+dataset, and `SITES=1` lists every site with its repeat rate and votes.
 
 **Height** comes from crossing the maps. A flat tile fixes X and Z but not Y; the
 isometric maps are shot at inclination 30, folding height into their vertical
