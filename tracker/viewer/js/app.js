@@ -785,6 +785,48 @@
 
   var calRecords = [];
 
+  /* ---- picking X/Z off the map ----------------------------------------
+     Typing coordinates off F3 is exact but needs you to have been there with
+     the game open; picking off the map covers the far commoner case of
+     remembering WHERE something happened while looking at it. The two are not
+     equally precise and the UI must not pretend they are: a click is only as
+     good as the zoom, so the blocks-per-pixel is measured at the moment of the
+     click and reported, and anything coarser than a few blocks says so.
+
+     Y is deliberately not filled in. An overhead tile is a top-down projection
+     -- a change at y=8 and one at y=200 land on the same pixel -- so there is
+     nothing on this map to read a height off, and quietly writing 64 would put
+     a fabricated number into the one file everything downstream trusts. */
+
+  function calArmPick() {
+    var on = map.setPickMode(!map.pickMode());
+    $("calPick").classList.toggle("is-armed", on);
+    $("calPickHint").textContent = on ? "click the map" : "";
+    $("calPickHint").className = "cal__status";
+  }
+
+  function calPicked(pt, blocksPerPixel) {
+    $("calPick").classList.remove("is-armed");
+    $("calX").value = String(Math.round(pt.x));
+    $("calZ").value = String(Math.round(pt.z));
+    var hint = $("calPickHint");
+    /* A pixel is the best a click can be, and the grid underneath it is 8 blocks
+       wide -- so at high zoom the honest floor is half a tile, not the pixel.
+       The number shown is what the record is worth.
+
+       The "zoom in" line is at 12 blocks and not higher because the map clamps
+       at scale 0.4, which is 20 blocks per pixel: a threshold above that could
+       never fire, and a warning that cannot fire is worse than none. Even the
+       worst pick here is well inside the model's own ~100-block error, so this
+       is advice, not a veto. */
+    var bpt = state.model ? state.model.blocksPerTile : 8;
+    var precision = Math.max(bpt / 2, blocksPerPixel);
+    var coarse = precision > 12;
+    hint.textContent = "+/- " + Math.round(precision) + " blocks" + (coarse ? " -- zoom in for a tighter one" : "");
+    hint.className = "cal__status" + (coarse ? " is-bad" : "");
+    if (!$("calY").value) $("calY").focus();
+  }
+
   function calLoad() {
     return fetch("/api/calibration", { cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : { records: [] }; })
@@ -948,6 +990,10 @@
       status.textContent = "recorded";
       status.className = "cal__status is-good";
       $("calNote").value = "";
+      // The crosshair belongs to the record being entered, not to the map.
+      // Leaving it up makes the next pick ambiguous about which one it marks.
+      map.clearPicked();
+      $("calPickHint").textContent = "";
       return calLoad();
     }).catch(function (e) {
       status.textContent = "could not reach the server";
@@ -1078,6 +1124,7 @@
         $("trackGroup").open = true;
         P.renderTrackDetail($("trackPanel"), tr, state.trackEvents, state.model, map.trackHue(tr), seek);
       },
+      onPickPoint: calPicked,
       onView: function () { updateBadge(); }
     });
 
@@ -1392,6 +1439,16 @@
     });
 
     $("calAdd").addEventListener("click", calSubmit);
+    $("calPick").addEventListener("click", calArmPick);
+    // Escape disarms. An armed map eats the next click, and the way out of that
+    // has to be the key everyone already tries.
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && map.pickMode()) {
+        map.setPickMode(false);
+        $("calPick").classList.remove("is-armed");
+        $("calPickHint").textContent = "";
+      }
+    });
     // Enter anywhere in the form records, so a session can be logged without
     // reaching for the mouse between points.
     ["calPlayer", "calX", "calY", "calZ", "calNote"].forEach(function (id) {

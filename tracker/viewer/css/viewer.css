@@ -615,6 +615,13 @@ kbd {
 .cal__row--xyz { gap: 4px; }
 .cal__row--xyz input { flex: 1 1 0; font-family: var(--mono); }
 
+/* Armed, waiting for a click on the map. Deliberately loud: a mode you have
+   forgotten you are in swallows the next click and looks like a broken map. */
+#calPick.is-armed {
+  border-color: var(--status-warning);
+  color: var(--status-warning);
+  box-shadow: inset 0 0 0 1px var(--status-warning);
+}
 .cal__actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .btn--primary {
   background: var(--series-players);

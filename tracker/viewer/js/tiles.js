@@ -131,9 +131,35 @@ window.DV = window.DV || {};
                gy: (py - state.h / 2) / state.scale + state.gy };
     }
     /* grid <-> tile: gy is -tz so that north (higher tileY) draws upward. */
+    /* Through the ACTIVE projection, so a click means the same thing on a
+       skewed map as on the flat one. screenToGrid collapses to toGrid exactly
+       when the projection is overhead, so this costs nothing there. */
     function cellAt(px, py) {
-      var g = toGrid(px, py);
+      var g = screenToGrid(px, py);
       return { tx: Math.floor(g.gx), tz: -Math.floor(g.gy) - 1 };
+    }
+
+    /* Where on the map is this pixel, in world blocks?
+
+       Note the sign. Grid gy is worldZ/blocksPerTile, NOT its negation: a tile
+       named 256_600 covers world z -4808..-4800, and cellAt turns gy into it
+       with tz = -floor(gy)-1, which only works out if gy is already -601. The
+       clickable-track hit test had this backwards -- it passed -gy*bpt and so
+       looked for tracks mirrored across the equator, which is why clicking one
+       worked only near z 0. */
+    function pointAt(px, py) {
+      var g = screenToGrid(px, py);
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      return { x: g.gx * bpt, z: g.gy * bpt };
+    }
+
+    /* How many world blocks one screen pixel covers -- the precision of any
+       click, and the honest error bar on a position picked off the map. Worth
+       stating rather than hiding: zoomed out, a pixel is tens of blocks, and a
+       calibration record that pretends otherwise poisons every fit downstream. */
+    function blocksPerPixel() {
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      return bpt / Math.max(1e-6, state.scale);
     }
     function cellRect(tx, tz) {
       var p = toScreen(tx, -tz - 1);
@@ -453,6 +479,7 @@ window.DV = window.DV || {};
       /* --- selection + hover ------------------------------------------- */
       if (state.selected) outline(state.selected, pal.players, 2);
       if (state.hover) outline(state.hover, pal.text1, 1);
+      drawPicked();
 
       if (state.showRuler) drawRuler(vis);
     }
@@ -707,6 +734,33 @@ window.DV = window.DV || {};
           ctx.fillText(label, last.x, last.y - 8);
         }
       }
+      ctx.restore();
+    }
+
+    /* The position picked off the map for a calibration record. Drawn as a
+       crosshair with a ring the size of the click's own precision, so an
+       imprecise pick looks imprecise instead of looking like a fix. */
+    function drawPicked() {
+      if (!state.picked) return;
+      var p = worldToScreen(state.picked.x, state.picked.z, 64);
+      /* The ring is the pick's own precision drawn to scale: the coarser the
+         zoom it was taken at, the wider it sits. Same quantity the panel prints
+         in blocks, converted back to pixels. */
+      var bpp = blocksPerPixel();
+      var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
+      var r = Math.max(3, Math.max(bpt / 2, bpp) / bpp);
+      ctx.save();
+      ctx.strokeStyle = pal.warning;
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.95;
+      ctx.beginPath();
+      ctx.moveTo(p.x - 9, p.y); ctx.lineTo(p.x - 3, p.y);
+      ctx.moveTo(p.x + 3, p.y); ctx.lineTo(p.x + 9, p.y);
+      ctx.moveTo(p.x, p.y - 9); ctx.lineTo(p.x, p.y - 3);
+      ctx.moveTo(p.x, p.y + 3); ctx.lineTo(p.x, p.y + 9);
+      ctx.stroke();
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 6.2832); ctx.stroke();
       ctx.restore();
     }
 
@@ -1147,10 +1201,21 @@ window.DV = window.DV || {};
         /* A track under the pointer wins over the tile beneath it: the track is
            the smaller, more deliberate target, and the tile is always available
            by clicking away from one. */
+        /* PICKING A POSITION beats both. It is a deliberate, armed mode -- the
+           user pressed a button and the cursor is a crosshair -- so nothing
+           else may swallow the click. */
+        if (state.pickMode && opts.onPickPoint) {
+          var pt = pointAt(px, py);
+          state.pickMode = false;
+          state.picked = pt;
+          canvas.style.cursor = "";
+          invalidate();
+          opts.onPickPoint(pt, blocksPerPixel());
+          return;
+        }
         if (state.showTracks && opts.onTrackSelect) {
-          var g = toGrid(px, py);
-          var bpt = state.model ? state.model.blocksPerTile : M.BLOCKS_PER_TILE;
-          var hit = api.trackAt(g.gx * bpt, -g.gy * bpt);
+          var w = pointAt(px, py);
+          var hit = api.trackAt(w.x, w.z);
           if (hit) {
             state.selectedTrack = hit.id;
             invalidate();
@@ -1342,6 +1407,20 @@ window.DV = window.DV || {};
         }
         return best;
       },
+      /* Arm the next click to report a world position instead of selecting.
+         One shot: it disarms itself on use or on a second press, so the map
+         never sits in a mode the user has forgotten about. */
+      setPickMode: function (on) {
+        state.pickMode = !!on;
+        canvas.style.cursor = state.pickMode ? "crosshair" : "";
+        invalidate();
+        return state.pickMode;
+      },
+      pickMode: function () { return !!state.pickMode; },
+      /* The last picked point, drawn so what was recorded is visible on the map
+         rather than only in a form field. */
+      picked: function () { return state.picked || null; },
+      clearPicked: function () { state.picked = null; invalidate(); },
       setNelt: function (p, h) { portals = p; highways = h; invalidate(); },
       setPolitical: function (cfg) { state.political = cfg; invalidate(); },
       markerSummary: function () {

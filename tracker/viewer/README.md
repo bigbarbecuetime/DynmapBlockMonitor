@@ -156,6 +156,18 @@ block jump in 60s is 971 nether blocks at 16 b/s — an ice boat) and against th
 Nelt's public portals. Drawn **dashed** when accounted for, **dotted** when not,
 so an unexplained hop never reads as a route.
 
+**Calibration** records ground truth: "at this instant this player was exactly
+here". The instant always comes from the cursor, never a typed timestamp — you
+scrub to the moment you remember. The position can be typed from F3 or picked
+off the map with **Pick X/Z**, which arms the next click (Escape or a second
+press disarms; the map shows a crosshair while armed). A pick is only as good as
+the zoom, so the blocks-per-pixel is measured at the moment of the click and
+reported next to the button — 4 blocks zoomed in, 20 at the zoom floor, which is
+still well inside the model's own ~100-block error. **Y is never filled in**: an
+overhead tile is a top-down projection, a change at y=8 and one at y=200 land on
+the same pixel, and writing a plausible 64 would put a fabricated number into
+the one file everything downstream trusts.
+
 **Layers.** Historical political maps come from craftix (339 snapshots,
 2018-09-08 to 2026-07-20), which publish at one pixel per block with
 `topLeft {-5504,-5504}` — the same frame as the world border — so they underlay

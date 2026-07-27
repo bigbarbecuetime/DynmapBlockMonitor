@@ -296,6 +296,12 @@
           <input id="calZ" type="number" step="1" placeholder="z" autocomplete="off">
         </div>
         <div class="cal__row">
+          <label></label>
+          <button id="calPick" class="btn" type="button"
+            title="Click a spot on the map to fill X and Z. Y is not on an overhead map, so type it from F3.">&#9678; Pick X/Z on the map</button>
+          <span id="calPickHint" class="cal__status"></span>
+        </div>
+        <div class="cal__row">
           <label for="calActivity">Doing</label>
           <select id="calActivity">
             <option value="standing">standing still</option>
