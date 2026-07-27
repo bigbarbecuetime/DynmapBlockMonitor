@@ -311,19 +311,33 @@ function main() {
 
     if (sessions.length >= 2) {
       console.log("\nleave-one-session-out:");
-      let held = [];
+      let placed = 0, total = 0, sumErr = 0, blindFolds = 0;
       for (const s of sessions) {
         const train = records.filter(r => r.session !== s);
         const test = records.filter(r => r.session === s);
         const rf = nelderMead(v => score(DV, raw, toParams(v), train).objective,
                               x0, [15000, 15000, 24], 40);
         const out = score(DV, raw, toParams(rf.x), test);
-        held.push(out.mean);
-        console.log("  hold out " + s + ": mean " + fmt(out.mean) + "  (" + showVec(rf.x) + ")");
+        placed += out.matched; total += out.n;
+        if (out.matched) sumErr += out.mean * out.matched; else blindFolds++;
+        console.log("  hold out " + s + ": placed " + out.matched + "/" + out.n +
+          "  mean " + fmt(out.mean) + "  (" + showVec(rf.x) + ")");
       }
-      const ok = held.filter(isFinite);
-      console.log("  held-out mean: " + fmt(ok.reduce((a, b) => a + b, 0) / ok.length) +
-        "   <- the only number that predicts new sites");
+      /* Averaging only the folds that matched something is exactly the flattery
+         this harness exists to prevent: a fold that placed NOTHING is the worst
+         possible outcome, not a missing sample, and dropping it turned two total
+         failures and one 44b fold into a confident-looking "44b". Report the
+         coverage first, and pool the error over the points actually placed. */
+      console.log("  ---");
+      console.log("  placed " + placed + "/" + total + " held-out points" +
+        (blindFolds ? "; " + blindFolds + " of " + sessions.length + " folds placed NOTHING" : ""));
+      console.log("  mean error over the ones it did place: " +
+        (placed ? fmt(sumErr / placed) : "  --"));
+      if (blindFolds) {
+        console.log("  -> NOT a validated result. A fit that cannot place a session it");
+        console.log("     did not train on has not generalised, however small the error");
+        console.log("     on the sessions it could.");
+      }
     }
   }
 }
