@@ -248,6 +248,23 @@ matters: tile linking hops across the disc and inflated speed to 3.8–8.5
 blocks/s, while per-slice estimates give 2.2 median / 3.3 p90 — matching the 2.2
 measured directly from the solo stretches.
 
+**The path only moves when it can be shown to have moved.** A slice's estimate
+is the centre of whatever rendered in that minute, which is a sparse, lopsided
+sample of an 86-block disc — and half of all slices carry one or two renders.
+A single render was being reported as a 12-block fix when the tile it came from
+sits a median 86 blocks from the player, so two overconfident single-tile
+estimates 200 blocks apart cleared the noise floor and got drawn as walking.
+The error floor is now the disc radius shrunk by √n. On top of that, a step
+smaller than the combined error of its endpoints is not a step (hold position
+and average the estimates, which are independent draws), and **a move must
+stick**: someone who went 400 blocks is still 400 blocks away a minute later,
+so if the next estimate falls back toward where they were, the excursion was a
+stray render and not a leg. Raw estimates survive on `rx`/`rz`.
+
+Together these cut tracks travelling more than 4× their own extent from **20%
+to 1%** and median track travel from 788 to 341 blocks, with the ground-truth
+error unchanged at ~92 blocks mean.
+
 **Held ground is separated out before anything is linked.** A chunk loader, a
 farm someone left running, or spawn chunks keep a patch of world loaded with
 nobody near it, and it renders forever from a fixed spot — locally
@@ -314,8 +331,11 @@ people online. It agrees exactly **52%** of the time over the whole log (86% ove
 the 2026-07-27 morning), errs low, and overcounts only **1%** of the time — a
 player standing still loads nothing and is invisible here, which is the failure
 worth having. `node tools/tracks.js [from] [to]` prints the tracks and this
-score; `HELD=0` turns the held-ground pass off for a before/after on one
-dataset, and `SITES=1` lists every site with its repeat rate and votes.
+score; `HELD=0` and `STEADY=0` turn the held-ground pass and the path settling
+off for a before/after on one dataset, `SITES=1` lists every site with its
+repeat rate and votes, and `FULL=1` builds over the whole log while printing
+only the given window — which is not the same thing, since attribution resolves
+by elimination across every track in the build.
 
 **Height** comes from crossing the maps. A flat tile fixes X and Z but not Y; the
 isometric maps are shot at inclination 30, folding height into their vertical

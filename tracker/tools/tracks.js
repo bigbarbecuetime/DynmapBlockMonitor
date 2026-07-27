@@ -58,10 +58,13 @@ function main() {
   // one dataset -- the log grows while the tracker runs and comparing two runs
   // minutes apart compares two different files.
   const heldOff = process.env.HELD === "0";
-  const tracks = DV.infer.buildTracks(model, { from, to, mapConfigs: raw.maps, heldSites: !heldOff });
+  const steadyOff = process.env.STEADY === "0";
+  const tracks = DV.infer.buildTracks(model, { from, to, mapConfigs: raw.maps,
+    heldSites: !heldOff, steadyPath: !steadyOff });
   const s = DV.infer.scoreTracks(model, tracks, { from, to });
 
-  console.log("window " + hhmm(from) + " .. " + hhmm(to) + (heldOff ? "   [held-site pass OFF]" : ""));
+  console.log("window " + hhmm(from) + " .. " + hhmm(to) +
+    (heldOff ? "   [held-site pass OFF]" : "") + (steadyOff ? "   [path settling OFF]" : ""));
   console.log("tiles " + model.tiles.length + "   render delay " + (model.renderDelayMs / 1000) + "s");
   console.log("tracks " + tracks.length +
     (s ? "   roster agreement " + (100 * s.exact).toFixed(1) + "%  meanAbsErr " + s.meanAbsErr.toFixed(2) +

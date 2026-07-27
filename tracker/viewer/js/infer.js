@@ -442,7 +442,20 @@ window.DV = window.DV || {};
              terrain is tickable inside the loaded disc -- so the bias does not
              shrink with more samples. The honest uncertainty is tied to the disc
              radius itself. */
-          err: Math.max(Math.sqrt(1 / sw), (grp.length ? rad / grp.length : 0) * 0.6, 12),
+          /* ONE RENDER IS NOT A 12-BLOCK FIX. The measured radius of a group is
+             only meaningful once there are enough renders to have sampled the
+             disc: a slice holding a single tile has radius 0, and the formula
+             was reporting that as an 8-to-12-block position when the tile is a
+             median 86 blocks from the player (42.9h of solo stretches). Half a
+             track's slices hold one or two renders, so this was the dominant
+             source of the scribble -- two overconfident single-tile estimates
+             200 blocks apart cleared the noise floor and got drawn as walking.
+
+             The floor is the disc radius shrunk by the square root of the
+             sample count, which is what averaging n draws from the disc buys,
+             and never below the bias the extent centre carries anyway. */
+          err: Math.max(Math.sqrt(1 / sw), (grp.length ? rad / grp.length : 0) * 0.6,
+                        DISC_BLOCKS / Math.sqrt(grp.length), 12),
           loose: looseOnly,
           online: grp[grp.length - 1].online, roster: grp[grp.length - 1].roster
         });
@@ -606,13 +619,110 @@ window.DV = window.DV || {};
     });
     attributeTracks(tracks, model, opts, sliceMs);
 
-    // Label every leg and lift the impossible ones out as events.
+    // Settle the path before reading anything off it, then label every leg and
+    // lift the impossible ones out as events.
+    tracks.forEach(function (tr) { steadyPath(tr, opts); });
     tracks.forEach(function (tr) { annotateTrack(tr, model, opts); });
     /* Carried on the array rather than wrapped in an object: every caller
        already treats the return value as the track list. */
     tracks.heldSites = held.sites;
     tracks.sites = held.allSites;
     return tracks;
+  }
+
+  /* ==========================================================================
+     A PATH THAT ONLY MOVES WHEN IT CAN BE SHOWN TO HAVE MOVED
+     --------------------------------------------------------------------------
+     Even with the right person on the right track, the drawn line came out as a
+     scribble: a knot of legs shooting a few hundred blocks out and back inside a
+     small area. None of that is travel. Two things produce it, and both are
+     properties of the estimator rather than of the player.
+
+     The estimate jitters because it is the centre of whatever happened to
+     render in that minute, and what renders is a sparse, lopsided sample of a
+     disc roughly 86 blocks in radius. Half the slices carry one or two renders.
+     Successive centres therefore hop across the disc while the player stands
+     still -- exactly the effect that moved the slice length from 20s to 60s,
+     just not all the way gone.
+
+     And a lone render can be nowhere near the player at all. Renders fire on
+     block events in LOADED chunks, so anything still loaded can speak up: one
+     tile at (420,-644) landed in the middle of a session otherwise confined
+     between z -60 and -340, for one slice, and the path dutifully sprinted
+     400 blocks north and back.
+
+     So the path is settled before anything is read off it:
+
+       * a step smaller than the combined error of its two endpoints is not a
+         step. Hold position and fold the new estimate into a running mean of
+         where we already are -- successive extent centres are independent
+         draws, so averaging them while stationary genuinely tightens the
+         answer, unlike averaging renders inside one slice (which walks into
+         whatever terrain ticks, and is why the extent centre is used at all).
+
+       * A MOVE MUST STICK. Someone who went 400 blocks is still 400 blocks
+         away a minute later. If the next estimate falls back toward where they
+         were rather than following, the excursion did not happen and the point
+         is an outlier, not a leg. This is the one that kills the stray-render
+         spikes, and it costs nothing real: a genuine move is confirmed by its
+         own continuation.
+
+     Raw estimates are kept on rx/rz so nothing is destroyed, only quietened.
+     ======================================================================== */
+
+  /* How far a loading tile sits from the player it belongs to: median 10.8
+     tiles over 42.9h of stretches with exactly one person online. The scale of
+     everything uncertain here. */
+  var DISC_BLOCKS = 86;
+
+  function steadyPath(tr, opts) {
+    opts = opts || {};
+    if (opts.steadyPath === false) return tr;
+    var pts = tr.points;
+    if (!pts || pts.length < 2) return tr;
+    for (var i = 0; i < pts.length; i++) { pts[i].rx = pts[i].tx; pts[i].rz = pts[i].tz; }
+
+    var ax = pts[0].rx, az = pts[0].rz, n = 1;
+    pts[0].tx = ax; pts[0].tz = az;
+    for (i = 1; i < pts.length; i++) {
+      var p = pts[i];
+      var sig = Math.max(24, Math.hypot(p.err || 0, pts[i - 1].err || 0));
+      var d = Math.hypot(p.rx - ax, p.rz - az);
+
+      if (d <= sig) {                       // indistinguishable from here
+        n++; ax += (p.rx - ax) / n; az += (p.rz - az) / n;
+        p.tx = ax; p.tz = az; p.steady = true;
+        continue;
+      }
+      /* Far enough to be a move -- but only if the next estimate goes with it.
+         The last point has nothing to confirm it, so it is taken at face value
+         rather than silently deleted at the end of every track. */
+      var nx = pts[i + 1];
+      if (nx && Math.hypot(nx.rx - ax, nx.rz - az) < Math.hypot(nx.rx - p.rx, nx.rz - p.rz)) {
+        p.tx = ax; p.tz = az; p.outlier = true;
+        continue;
+      }
+      ax = p.rx; az = p.rz; n = 1;
+      p.tx = ax; p.tz = az;
+    }
+
+    // Everything downstream reads the path, so re-derive it from the settled one.
+    tr.dist = 0;
+    tr.minTx = tr.maxTx = pts[0].tx; tr.minTz = tr.maxTz = pts[0].tz;
+    for (i = 0; i < pts.length; i++) {
+      if (i) tr.dist += Math.hypot(pts[i].tx - pts[i - 1].tx, pts[i].tz - pts[i - 1].tz);
+      if (pts[i].tx < tr.minTx) tr.minTx = pts[i].tx;
+      if (pts[i].tx > tr.maxTx) tr.maxTx = pts[i].tx;
+      if (pts[i].tz < tr.minTz) tr.minTz = pts[i].tz;
+      if (pts[i].tz > tr.maxTz) tr.maxTz = pts[i].tz;
+    }
+    tr.lastTx = pts[pts.length - 1].tx;
+    tr.lastTz = pts[pts.length - 1].tz;
+    tr.blocksTravelled = Math.round(tr.dist);
+    tr.spanTiles = Math.hypot(tr.maxTx - tr.minTx, tr.maxTz - tr.minTz);
+    tr.speedBlocksPerSec = tr.durationMs > 0 ? tr.blocksTravelled / (tr.durationMs / 1000) : 0;
+    tr.settled = pts.filter(function (q) { return q.steady || q.outlier; }).length;
+    return tr;
   }
 
   /* ==========================================================================
@@ -701,6 +811,10 @@ window.DV = window.DV || {};
       if (!tr.viable.length) tr.viable = tr.candidates.slice();
     });
 
+    // Time order, so the resolution runs forwards and the reachability check
+    // above always has the earlier, better-anchored positions to work from.
+    free.sort(function (a, b) { return a.startMs - b.startMs; });
+
     /* ---- the hard edges: joins and leaves -------------------------------- */
     var trans = model.transitions || [];
     function edgeNames(type, ms, before) {
@@ -787,10 +901,22 @@ window.DV = window.DV || {};
     while (changed && rounds++ < maxRounds) {
       changed = false;
 
-      // (a) one candidate left standing
+      /* (a) one candidate left standing -- and able to have got there.
+
+         The geometry check belongs here too, not only on the weaker rules. Two
+         tracks running at the same time compete for the same names, and
+         whichever is assigned first takes one out of play for the other, so an
+         arbitrary order decides the answer: the pale-oak track and the Jaune
+         track were swapping owners depending on which came first in the list,
+         putting bigboytrain360 6,462 blocks from where they were. Refusing an
+         assignment that needs a player to cross 11,000 blocks in ninety seconds
+         removes the arbitrariness -- one of the two orderings is simply not
+         possible, and the tracks are worked through in time order so that
+         earlier, better-anchored positions constrain later ones. */
       for (var i = 0; i < free.length; i++) {
         var tr = free[i];
         if (tr.player || tr.viable.length !== 1) continue;
+        if (!reachable(tr, tr.viable[0])) continue;
         assign(tr, tr.viable[0],
           tr.candidates.length === 1
             ? "the only player online for the whole track"
