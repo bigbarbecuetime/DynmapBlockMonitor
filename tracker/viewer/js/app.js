@@ -249,9 +249,21 @@
         if (!world) throw new Error("world not in configuration");
         var byPrefix = {};
         (world.maps || []).forEach(function (mp) { byPrefix[mp.prefix] = mp; });
+        var firstConfigs = !state.mapConfigs;
         state.mapConfigs = byPrefix;
         state.worldCenter = world.center;
         applyMapProjection();
+        /* Rebuild, because the model has already been built WITHOUT these and
+           it needs them to choose its frame. The load order is rebuild() first,
+           then this fetch, so on the first pass mapConfigs was null exactly when
+           the model was deciding which projection to work in -- it cannot tell
+           an overhead map from an isometric one without the matrices, so it fell
+           back to whichever map merely logged the most tiles. On this server
+           that is the isometric "t" (47638 tiles against flat2's 27348), so
+           every position was being computed in a skewed frame: the calibration
+           panel put a player 4740 blocks from where they stood, at (5021,-1052)
+           instead of (2174,-4837). */
+        if (firstConfigs) rebuild(true);
       })
       .catch(function () { state.mapConfigs = null; })
       .then(function () { renderSlow(); });
@@ -499,6 +511,7 @@
      and the same number of click closures per second -- and three of them cannot
      change unless the model does. */
   var lastModelRendered = null, lastWindowRendered = "";
+  var lastTracksBuilt = null;   // model+window+toggle key the tracks were built for
 
   function renderSlow() {
     var m = state.model;
@@ -508,30 +521,50 @@
     // --- model-only: lifecycle events and the quality report
     if (m !== lastModelRendered) {
       lastModelRendered = m;
-      // Tracks: only built when asked for -- linking is O(tiles) and pointless
-    // unless the layer or the panel is actually being looked at.
-    if (map.get("showTracks")) {
-      state.tracks = DV.infer.buildTracks(m, {
-        from: w.t0, to: w.t1, portals: state.portals,
-        // Every map type contributes: the isometric maps fire far more often
-        // than the flat one and cover moments it misses entirely.
-        mapConfigs: state.mapConfigs
-      });
-      state.trackScore = DV.infer.scoreTracks(m, state.tracks, { from: w.t0, to: w.t1 });
-      state.trackEvents = DV.infer.linkEvents(state.tracks, m, { portals: state.portals });
-      map.setTracks(state.tracks, state.trackEvents);
-    } else {
-      state.tracks = null; state.trackScore = null; state.trackEvents = null; map.setTracks(null, null);
-    }
-    P.renderTracks($("tracksPanel"), state.tracks, state.trackScore, m, function (tr) {
-      map.centerOn(tr.points[0].tx, tr.points[0].tz, Math.max(map.view().scale, 4));
-      seek(tr.startMs);
-    });
-    $("trackCount").textContent = state.tracks ? state.tracks.length + " found" : "";
-
-    P.renderQuality($("qualityPanel"), m);
+      P.renderQuality($("qualityPanel"), m);
       $("qualityCount").textContent = m.quality.length ? m.quality.length + " notes" : "";
       P.renderEvents($("eventFeed"), m, seek);
+    }
+
+    /* Tracks depend on the model AND the window AND the toggle, so they are
+       keyed on all three. They used to be built only inside the model-changed
+       branch above, which meant switching the layer on rebuilt nothing and
+       moving the window rebuilt nothing: whatever had been built at the last
+       model change stayed on screen. That is how the viewer came to show 71
+       tracks while the same data through tools/calibrate.js gave 311 -- the
+       viewer was drawing a stale set, and the calibration panel was correctly
+       reporting "no track" for records that set did not reach.
+
+       Still only built when the layer is on: linking is O(tiles). */
+    var wantTracks = map.get("showTracks");
+    /* Quantised to the minute on purpose. Keying on the raw window made live
+       mode rebuild every poll -- t1 advances continuously, so 300+ tracks were
+       relinked several times a second, the page stopped responding, and the
+       count visibly flickered between rebuilds. A minute of granularity keeps
+       the layer current without relinking for a second of new data. */
+    var trackKey = wantTracks
+      ? (m.stamp + "|" + Math.floor(w.t0 / 60000) + "|" + Math.floor(w.t1 / 60000))
+      : "";
+    if (trackKey !== lastTracksBuilt) {
+      lastTracksBuilt = trackKey;
+      if (wantTracks) {
+        state.tracks = DV.infer.buildTracks(m, {
+          from: w.t0, to: w.t1, portals: state.portals,
+          // Every map type contributes: the isometric maps fire far more often
+          // than the flat one and cover moments it misses entirely.
+          mapConfigs: state.mapConfigs
+        });
+        state.trackScore = DV.infer.scoreTracks(m, state.tracks, { from: w.t0, to: w.t1 });
+        state.trackEvents = DV.infer.linkEvents(state.tracks, m, { portals: state.portals });
+        map.setTracks(state.tracks, state.trackEvents);
+      } else {
+        state.tracks = null; state.trackScore = null; state.trackEvents = null; map.setTracks(null, null);
+      }
+      P.renderTracks($("tracksPanel"), state.tracks, state.trackScore, m, function (tr) {
+        map.centerOn(tr.points[0].tx, tr.points[0].tz, Math.max(map.view().scale, 4));
+        seek(tr.startMs);
+      });
+      $("trackCount").textContent = state.tracks ? state.tracks.length + " found" : "";
     }
 
     /* --- cursor-dependent.
@@ -590,7 +623,27 @@
 
   /* Force the panels that are otherwise change-gated to redraw (theme switch,
      tab switch, anything that replaces their DOM out from under us). */
-  function invalidatePanels() { lastModelRendered = null; lastWindowRendered = ""; }
+  /* A read-only window into what the page actually built, so a disagreement
+     between the viewer and tools/calibrate.js can be settled by comparing the
+     two directly instead of inferring it from rendered text. */
+  DV.debugState = function () {
+    var m = state.model, w = transport.window();
+    return {
+      tiles: m ? m.tiles.length : 0,
+      allTiles: m && m.allTiles ? m.allTiles.length : 0,
+      mapType: m ? m.mapType : null,
+      mapTypes: m ? m.mapTypes : null,
+      renderDelayMs: m ? m.renderDelayMs : null,
+      blocksPerTile: m ? m.blocksPerTile : null,
+      firstTileMs: m && m.tiles.length ? m.tiles[0].tileMs : null,
+      lastTileMs: m && m.tiles.length ? m.tiles[m.tiles.length - 1].tileMs : null,
+      windowT0: w.t0, windowT1: w.t1,
+      mapConfigKeys: state.mapConfigs ? Object.keys(state.mapConfigs) : null,
+      tracks: state.tracks ? state.tracks.length : 0
+    };
+  };
+
+  function invalidatePanels() { lastModelRendered = null; lastWindowRendered = ""; lastTracksBuilt = null; }
 
   function renderHeatLegend() {
     var lg = map.heatLegend();
@@ -749,23 +802,42 @@
   /* How far the model's track for that player sits from where they actually
      were, interpolated along the track because a record almost never lands on a
      slice boundary. */
-  function calError(rec) {
+  /* Matches tools/calibrate.js exactly, so the panel and the harness cannot
+     disagree about the same record. Two details carry that:
+
+     Interpolate along the segment the record falls in -- points are 60s apart
+     and a record almost never lands on a boundary, so snapping to the nearest
+     node would charge the model for up to half a slice of the player's own
+     movement.
+
+     Then fall back to the nearest END of the track. A record can sit inside a
+     track's span but outside its point range (the span is padded by a slice),
+     and treating that as a total miss reported "no track" for a track that was
+     right there. Prefer the CLOSEST track in time rather than the first one
+     that happens to match the name -- the first-match version picked up an
+     unrelated track and reported a 5270 block error. */
+  function calModelPos(rec) {
     var tracks = state.tracks || [];
+    var fallback = null, fallbackGap = Infinity, fallbackId = null;
     for (var i = 0; i < tracks.length; i++) {
       var tr = tracks[i];
       if (tr.player !== rec.player) continue;
       if (rec.ms < tr.startMs - 60000 || rec.ms > tr.lastMs + 60000) continue;
       var pts = tr.points || [];
+      if (!pts.length) continue;
       for (var j = 1; j < pts.length; j++) {
         if (pts[j - 1].ms <= rec.ms && rec.ms <= pts[j].ms) {
           var a = pts[j - 1], b = pts[j];
           var t = (rec.ms - a.ms) / Math.max(1, b.ms - a.ms);
-          return Math.hypot(a.tx + t * (b.tx - a.tx) - rec.x,
-                            a.tz + t * (b.tz - a.tz) - rec.z);
+          return { x: a.tx + t * (b.tx - a.tx), z: a.tz + t * (b.tz - a.tz),
+                   id: tr.id, how: "interpolated" };
         }
       }
+      var end = rec.ms < pts[0].ms ? pts[0] : pts[pts.length - 1];
+      var gap = Math.abs(end.ms - rec.ms);
+      if (gap < fallbackGap) { fallbackGap = gap; fallback = end; fallbackId = tr.id; }
     }
-    return NaN;
+    return fallback ? { x: fallback.tx, z: fallback.tz, id: fallbackId, how: "track end" } : null;
   }
 
   function renderCalibration() {
@@ -811,7 +883,8 @@
     var html = "";
     for (var i = 0; i < calRecords.length; i++) {
       var r = calRecords[i];
-      var e = (!win || r.ms < win.t0 || r.ms > win.t1) ? NaN : calError(r);
+      var mp = (!win || r.ms < win.t0 || r.ms > win.t1) ? null : calModelPos(r);
+      var e = mp ? Math.hypot(mp.x - r.x, mp.z - r.z) : NaN;
       /* "tracks off" and "no track" mean different things: one is a view
          setting, the other is the model failing to place a player it should
          have. Reporting both as "no track" made a switched-off layer look like
@@ -826,7 +899,10 @@
         '<span class="t">' + P.esc(M.fmtTime(r.ms)) + "</span>" +
         '<span class="who">' + P.esc(r.player) + "</span>" +
         '<span class="act">' + P.esc(r.activity) + "</span>" +
-        '<span class="err ' + cls + '">' + txt + "</span>" +
+        '<span class="err ' + cls + '" title="' + P.esc(
+            mp ? "you (" + Math.round(r.x) + ", " + Math.round(r.z) + ")  model (" +
+                 Math.round(mp.x) + ", " + Math.round(mp.z) + ")  track #" + mp.id + ", " + mp.how
+               : "no model position for this moment") + '">' + txt + "</span>" +
         "</div>";
     }
     list.innerHTML = html;
