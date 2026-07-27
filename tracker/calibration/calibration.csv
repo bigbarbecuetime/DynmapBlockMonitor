@@ -4,5 +4,5 @@ time,player,x,y,z,activity,radius,note
 2026-07-25T22:04:00Z,bigboytrain360,2122,63,-4840,running,0,sprinted here after HitBox left
 2026-07-25T22:06:00Z,bigboytrain360,2157,63,-4786,walking,0,moved at ~22:05 past the original spot
 2026-07-25T22:09:22Z,bigboytrain360,2157,63,-4786,standing,0,stood here until leaving
-2026-07-26T22:13:33Z,bigboytrain360,2130.0,64.0,-4921.0,mining,20.0,"broke a line 2130,64,-4901 to 2130,63,-4941; render burst 22:14:44-45 on tiles 266,612-617"
+2026-07-26T19:47:05Z,bigboytrain360,2130.0,64.0,-4921.0,mining,20.0,"broke a line 2130,64,-4901 to 2130,63,-4941; tile 266,616 rendered 19:48:16Z, minus the 71s render delay lands inside the 19:05:58-19:47:20 session"
 2026-07-27T01:44:19Z,bigboytrain360,2130.0,64.0,-4921.0,building,20.0,"replaced the same line; renders 01:45:30-01:46:17 on tiles 266,612/614/616"

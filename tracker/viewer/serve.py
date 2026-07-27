@@ -266,6 +266,36 @@ class Handler(SimpleHTTPRequestHandler):
             return self.api_calibration_add()
         return self._json_error(HTTPStatus.NOT_FOUND, "no such endpoint")
 
+    @staticmethod
+    def _roster_at(stamp):
+        """Who the game server reported online at `stamp`, or None if unknown.
+
+        players.csv is a step function -- a row is written only when the roster
+        CHANGES -- so the answer is the last snapshot at or before the instant,
+        and every row sharing that timestamp is one name in it. Returns None
+        rather than an empty list when the log cannot be read or the instant
+        predates it, so "we do not know" never reads as "nobody was on".
+        """
+        path = ROOT / "data" / "players.csv"
+        try:
+            best_time, names, seen_any = None, [], False
+            with path.open("r", encoding="utf-8", newline="") as f:
+                for row in csv.DictReader(f):
+                    t = (row.get("time") or "").strip()
+                    if not t or not (row.get("count") or "").strip():
+                        continue
+                    seen_any = True
+                    if t > stamp:
+                        break
+                    if t != best_time:
+                        best_time, names = t, []
+                    who = (row.get("player") or "").strip()
+                    if who:
+                        names.append(who)
+            return names if (seen_any and best_time is not None) else None
+        except OSError:
+            return None
+
     def api_calibration_list(self):
         rows = []
         try:
@@ -321,6 +351,20 @@ class Handler(SimpleHTTPRequestHandler):
         if not 0 <= radius <= 4096:
             return self._json_error(HTTPStatus.BAD_REQUEST, "radius must be 0..4096 blocks")
         note = str(payload.get("note", ""))[:200].replace("\n", " ").replace("\r", " ")
+
+        # A player who was not online cannot have been standing anywhere, so a
+        # record saying otherwise is a mistake worth refusing rather than
+        # storing. This is not hypothetical: a break was once timed from the
+        # render burst alone and landed in a window where the player was offline
+        # and the tiles belonged to somebody else walking past. Ground truth is
+        # trusted absolutely downstream, so it is the one place to be strict.
+        online = self._roster_at(stamp)
+        if online is not None and player not in online:
+            return self._json_error(
+                HTTPStatus.CONFLICT,
+                "%s was not online at %s (roster: %s). Check the time -- renders lag "
+                "the event by the render delay, so a burst is later than the act."
+                % (player, stamp, ", ".join(online) or "nobody"))
 
         try:
             CAL_DIR.mkdir(parents=True, exist_ok=True)
