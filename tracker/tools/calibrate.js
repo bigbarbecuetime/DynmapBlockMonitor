@@ -143,13 +143,12 @@ function buildAt(DV, raw, params) {
     mapConfigs: raw.maps,
     renderDelayMs: params.renderDelayMs
   });
-  const from = model.tiles[0].tileMs, to = model.tiles[model.tiles.length - 1].tileMs;
+  // No window: buildTracks reads the whole log, which is what it was always
+  // handed here anyway (first tile to last).
   const r = DV.infer.buildTracks(model, {
-    from, to, mapConfigs: raw.maps,
+    mapConfigs: raw.maps,
     sliceMs: params.sliceMs,
-    clusterRadius: params.clusterRadius,
-    // HELD=0 turns the chunk-loader pass off, for a before/after on one dataset.
-    heldSites: process.env.HELD !== "0"
+    clusterRadius: params.clusterRadius
   });
   return { model, tracks: Array.isArray(r) ? r : (r.tracks || []) };
 }

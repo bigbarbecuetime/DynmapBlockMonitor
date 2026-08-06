@@ -41,15 +41,27 @@ window.DV = window.DV || {};
 
     var parts = [];
     parts.push('<div class="stats">');
-    parts.push(stat("Players online", !covered ? "&mdash;" : snap ? String(snap.count) : "&mdash;",
+    /* snap.online, not snap.count: the names are a floor under the head-count, so
+       a sample that lists someone the count leaves out still reads as one player
+       online rather than an empty server. */
+    parts.push(stat("Players online", !covered ? "&mdash;" : snap ? String(snap.online) : "&mdash;",
       !covered ? "tracker off" : snap ? "as of " + M.fmtTime(snap.ms) : "before first sample"));
-    var lit = tilesInWindow(model, cursorMs, Math.max(60000, model.pollMs * 6));
-    parts.push(stat("Tiles changed", String(lit), "in the last " + M.fmtDur(Math.max(60000, model.pollMs * 6))));
+    /* The window this counts over can straddle a restart, so state how much of it
+       was actually watched. A count over an hour of which we recorded four
+       minutes is not the same number as a count over an hour, and printing it
+       bare next to "tracker was not running" was the panel contradicting
+       itself. */
+    var win = Math.max(60000, model.pollMs * 6);
+    var lit = tilesInWindow(model, cursorMs, win);
+    var offWin = model.uncoveredMs(cursorMs - win, cursorMs);
+    parts.push(stat("Tiles changed", String(lit), "in the last " + M.fmtDur(win) +
+      (offWin > 1000 ? ", " + M.fmtDur(offWin) + " of it unrecorded" : "")));
     parts.push("</div>");
 
     if (!covered) {
       parts.push(q("serious", "▲", "Tracker was not running",
-        "Nothing was recorded at " + M.fmtStamp(cursorMs) + ". This is missing data, not an empty server."));
+        "Nothing was recorded at " + M.fmtStamp(cursorMs) + ". This is missing data, not an empty server." +
+        (lit ? " The " + lit + " change" + (lit > 1 ? "s" : "") + " counted above fall in the recorded part of the window, not in this gap." : "")));
     } else if (!snap) {
       parts.push(q("info", "○", "Before the first player sample",
         "The tracker had started but had not yet logged a player snapshot."));
@@ -64,7 +76,7 @@ window.DV = window.DV || {};
            came or went -- it is evidence that nobody was looking. A 15.7h
            tracker outage was being reported as "no one has joined or left in
            14h 4m", with the reassurance that polling was ongoing. */
-        var off = offBetween(model, snap.ms, cursorMs);
+        var off = model.uncoveredMs(snap.ms, cursorMs);
         if (off > Math.max(model.playerPollMs * 3, 60000)) {
           parts.push(q("serious", "▲", "No roster row for " + M.fmtDur(stale) + ", but the tracker was off for " + M.fmtDur(off),
             "The last row is from " + M.fmtTime(snap.ms) + ", on the far side of a gap in recording. " +
@@ -82,9 +94,9 @@ window.DV = window.DV || {};
           ". Server List Ping caps its sample list, so some players cannot be named."));
       }
       if (snap.overfull) {
-        parts.push(q("warning", "⚠", "Roster contradicts the count",
-          "The count says " + snap.count + " but " + snap.roster.length +
-          " name(s) are listed. The server's own status reply was inconsistent here."));
+        parts.push(q("info", "○", "The count is short of the names",
+          "The server's count says " + snap.count + " but it named " + snap.roster.length +
+          ". Shown as " + snap.online + ", because naming an account is the server saying it was connected &mdash; a count is what a vanish plugin understates, not a name."));
       }
     }
 
@@ -95,7 +107,7 @@ window.DV = window.DV || {};
       r.className = "roster";
       if (!snap.roster.length) {
         r.innerHTML = '<span class="empty" style="padding:0">' +
-          (snap.count ? esc(snap.count + " online, none named by the server") : "Nobody online") + "</span>";
+          (snap.online ? esc(snap.online + " online, none named by the server") : "Nobody online") + "</span>";
       } else {
         snap.roster.forEach(function (n) {
           var p = document.createElement("span");
@@ -107,25 +119,12 @@ window.DV = window.DV || {};
           var more = document.createElement("span");
           more.className = "roster__p";
           more.style.opacity = "0.7";
-          more.textContent = "+" + (snap.count - snap.roster.length) + " unnamed";
+          more.textContent = "+" + (snap.online - snap.roster.length) + " unnamed";
           r.appendChild(more);
         }
       }
       root.appendChild(r);
     }
-  }
-
-  /* Milliseconds between a and b that no tracker run covers. The runs are built
-     in order and do not overlap, so walking them and summing the holes is
-     enough; anything outside every run is time nobody was recording. */
-  function offBetween(model, aMs, bMs) {
-    if (!model || !model.coverage || !(bMs > aMs)) return 0;
-    var cov = model.coverage, on = 0;
-    for (var i = 0; i < cov.length; i++) {
-      var s = Math.max(aMs, cov[i].startMs), e = Math.min(bMs, cov[i].endMs);
-      if (e > s) on += e - s;
-    }
-    return Math.max(0, (bMs - aMs) - on);
   }
 
   function stat(k, v, sub) {
@@ -196,7 +195,11 @@ window.DV = window.DV || {};
     var tb = document.createElement("tbody");
     rows.slice().reverse().slice(0, 400).forEach(function (s) {
       var tr = document.createElement("tr");
-      var flag = s.truncated ? ' <span title="sample capped by server">⚠</span>'
+      /* The placeholder case is checked first: it also reads as truncated, but
+         "capped its sample" and "would not name this one" are different facts. */
+      var flag = s.unnamed && s.unnamed.length
+                 ? ' <span title="server sent ' + esc(s.unnamed.join(", ")) + ' instead of a username">⚠</span>'
+               : s.truncated ? ' <span title="sample capped by server">⚠</span>'
                : s.overfull ? ' <span title="count is below the number of names listed">⚠</span>' : "";
       tr.innerHTML = "<td>" + M.fmtDate(s.ms) + "</td><td class=num>" + s.count + flag + "</td><td>" +
         (s.roster.length ? esc(s.roster.join(", ")) : '<span style="opacity:.55">none</span>') + "</td>";
@@ -280,8 +283,8 @@ window.DV = window.DV || {};
           "So those cannot be attributed to a player at all &mdash; the world ticks without them."));
       }
       if (uncovered) {
-        notes.push(q("warning", "⚠", uncovered + " change" + (uncovered > 1 ? "s" : "") + " landed outside a tracker run",
-          "Their timing is less certain; expected right at a start or stop."));
+        notes.push(q("warning", "⚠", uncovered + " change" + (uncovered > 1 ? "s" : "") + " sits outside every tracker run",
+          "The overhang a run's first poll normally has &mdash; the feed's buffer plus the render queue &mdash; is already allowed for, so these are further out than the mechanism explains. Read their timing loosely."));
       }
       /* Height, when the isometric maps were also logged. A flat tile alone
          cannot say how high up a change was -- it is a top-down projection. */
@@ -386,7 +389,16 @@ window.DV = window.DV || {};
 
     /* Everything that can make this correlation wrong, at this cursor. */
     var warn = [];
-    if (!model.covered(cursorMs)) warn.push(q("serious", "▲", "Tracker was off here", "Both sides of the correlation are missing."));
+    /* About the correlation WINDOW, since that is what the table above counts.
+       Judged at the cursor alone this said "both sides are missing" over a table
+       of tile changes from the recorded part of the same window. */
+    var offSpan = model.uncoveredMs(from, to);
+    if (offSpan >= to - from) {
+      warn.push(q("serious", "▲", "Tracker was off here", "Both sides of the correlation are missing for this whole window."));
+    } else if (offSpan > 0) {
+      warn.push(q("serious", "▲", "Tracker was off for " + M.fmtDur(offSpan) + " of this window",
+        "What is listed comes from the recorded part. Changes in the gap were never seen, so the counts here are a floor, not a total."));
+    }
     if (model.skew.ms > 0) {
       warn.push(q("info", "○", "Tile times shifted by −" + M.fmtDur(model.skew.ms),
         "Dynmap's clock runs ahead of the tracker host, so raw tile timestamps cannot be compared to player timestamps directly. This panel uses the corrected times."));
@@ -477,46 +489,27 @@ window.DV = window.DV || {};
   /* Inferred paths, with the honesty up front: the score line says how often the
      number of live tracks matched the number of people actually online, which is
      the only external check available. */
-  function renderTracks(root, tracks, score, model, onPick, events) {
+  function renderTracks(root, tracks, score, model, onPick) {
     root.innerHTML = "";
     if (!tracks) { root.innerHTML = '<div class="empty">Enable "Inferred player tracks" to build these.</div>'; return; }
     if (!tracks.length) { root.innerHTML = '<div class="empty">No tracks in this window.</div>'; return; }
 
-    var people = tracks.filter(function (t) { return !t.held; });
-    var ground = tracks.length - people.length;
-    var named = people.filter(function (t) { return t.player; }).length;
+    var named = tracks.filter(function (t) { return t.player; }).length;
     root.appendChild(el('<div class="stats">' +
-      stat("Player tracks", String(people.length), named + " attributable") +
-      stat("Held ground", String(ground), ground ? "kept loaded, not walked" : "none found") +
+      stat("Player tracks", String(tracks.length), named + " attributable") +
       stat("Match roster", score ? Math.round(score.exact * 100) + "%" : "&mdash;",
            score ? "off by " + score.meanAbsErr.toFixed(2) + " on average" : "") +
       "</div>"));
 
-    if (ground) {
-      root.appendChild(el(q("info", "▣", ground + " place" + (ground > 1 ? "s were" : " was") + " being held loaded",
-        "Somewhere with more going on than the head-count allows: while one person was online, " +
-        "this place kept re-rendering chunks it already had, at the same time as fresh ground was " +
-        "loading somewhere else. That is a chunk loader, a farm, or spawn chunks &mdash; the renders " +
-        "there locate the machine, not a player, so they are shown as a fixed place rather than " +
-        "joined into anybody's path.")));
-    }
-
-    /* Held ground that people keep materialising on. A pearl parked in a stasis
-       chamber is an entity, an entity needs its chunk loaded, so every chamber
-       in use is already in the held list -- this just says which of them get
-       arrived at. */
-    var stasis = (events && events.stasisSites) || [];
-    if (stasis.length) {
-      root.appendChild(el(q("warning", "◈",
-        stasis.length + " place" + (stasis.length > 1 ? "s people appear at" : " people appear at"),
-        "Someone arrived here faster than any travel allows, on ground that was being kept loaded at " +
-        "the time &mdash; which is what an ender-pearl stasis chamber looks like from outside, since the " +
-        "parked pearl is what holds the chunk up. " +
-        stasis.slice(0, 4).map(function (s) {
-          return "(" + Math.round(s.cx) + ", " + Math.round(s.cz) + ") &times;" + s.arrivals.length +
-            " &mdash; " + esc(Array.from(new Set(s.arrivals.map(function (a) { return a.player || "someone"; }))).join(", "));
-        }).join("; ") + ".")));
-    }
+    /* A machine left running looks exactly like somebody standing still, so
+       both are drawn as a person here. There used to be a pass that guessed
+       between them; it guessed wrong often enough to delete real visits, and
+       a track that is wrong on the page beats one that is not on it. */
+    root.appendChild(el(q("info", "▣", "A chunk loader reads as a player standing still",
+      "Renders only say a chunk was loaded, never who or what loaded it, so a farm somebody left " +
+      "running produces the same fixed patch of activity as a person who stopped moving. Both appear " +
+      "here as a track. Somewhere that keeps producing renders across days, especially with nobody " +
+      "on the roster, is worth reading as machinery rather than as a person.")));
 
     if (score) {
       root.appendChild(el(q("info", "○", "Idle players are invisible here",
@@ -536,12 +529,9 @@ window.DV = window.DV || {};
         "<td>" + M.fmtDur(tr.durationMs) + "</td>" +
         "<td class=num>" + tr.blocksTravelled.toLocaleString() + "</td>" +
         "<td class=num>" + tr.speedBlocksPerSec.toFixed(1) + "</td>" +
-        "<td>" + (tr.held ? '<span style="opacity:.65">held ground</span>'
-                 : tr.player ? esc(tr.player)
+        "<td>" + (tr.player ? esc(tr.player)
                  : '<span style="opacity:.65">' + (tr.candidates.length ? esc(tr.candidates.slice(0, 2).join(" / ")) : "unknown") + "</span>") + "</td>";
-      row.title = tr.held
-        ? "A place being kept loaded. Its renders do not say anyone was standing there."
-        : tr.attribution || "Not pinned to anyone: more than one player fits, and nothing rules the others out.";
+      row.title = tr.attribution || "Not pinned to anyone: more than one player fits, and nothing rules the others out.";
       row.addEventListener("click", function () { if (onPick) onPick(tr); });
       tb.appendChild(row);
     });

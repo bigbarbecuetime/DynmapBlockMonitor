@@ -286,43 +286,7 @@ window.DV = window.DV || {};
                  kind: t.kind, online: t.online, roster: t.roster });
     }
     out.sort(function (a, b) { return a.ms - b.ms; });
-    markFresh(out, opts.chunkHoldMs);
     return out;
-  }
-
-  /* ==========================================================================
-     A CHUNK LOADING IS NEWS; A CHUNK STAYING LOADED IS NOT
-     --------------------------------------------------------------------------
-     Renders only fire in LOADED chunks, so a render says "this chunk was
-     loaded" -- but that is a state, not an event, and only the moment it
-     BECAME loaded locates anybody. A chunk held loaded for an hour keeps
-     re-rendering as things grow and decay inside it, from a spot the player
-     left long ago.
-
-     The two populations are cleanly separated in this log. Splitting each
-     chunk's renders into visits at a 5-minute gap gives 19,428 visits over
-     34,256 flat tiles, and 75% of those visits are a SINGLE render lasting
-     0-3s: a player passed through, the chunk drew once, done. The tail is the
-     other thing entirely -- p90 is 267s and p99 is 1,110s of continuous
-     re-rendering from one chunk.
-
-     So each point is marked with whether its chunk was already loaded. Keyed
-     per map type, because the five maps each render the same physical chunk
-     independently and would otherwise mark each other as repeats.
-     ======================================================================== */
-  var CHUNK_HOLD_MS = 300000;
-
-  function markFresh(pts, holdMs) {
-    var hold = holdMs === undefined ? CHUNK_HOLD_MS : holdMs;
-    var last = new Map();
-    for (var i = 0; i < pts.length; i++) {
-      var p = pts[i];
-      var k = p.map + "|" + Math.floor(p.x / 16) + "," + Math.floor(p.z / 16);
-      var prev = last.get(k);
-      p.fresh = prev === undefined || (p.ms - prev) > hold;
-      last.set(k, p.ms);
-    }
-    return pts;
   }
 
   function buildTracks(model, opts) {
@@ -347,9 +311,20 @@ window.DV = window.DV || {};
     // stays whole while two players in different places stay apart.
     var clusterRadius = opts.clusterRadius === undefined ? 176 : opts.clusterRadius;
     var minPoints = opts.minPoints === undefined ? 3 : opts.minPoints;
-    var from = opts.from === undefined ? -Infinity : opts.from;
-    var to = opts.to === undefined ? Infinity : opts.to;
     var kinds = opts.kind || "load";
+
+    /* EVERY POINT IN THE LOG, ALWAYS. There is deliberately no from/to here.
+       Almost nothing in this file is a local decision: attribution resolves by
+       elimination across every track in the build, and a track is only a track
+       because of what came before and after it. Building inside a view window
+       therefore did not show a slice of the answer, it computed a different
+       answer -- the same evening named fewer players when looked at through a
+       narrower window, and every track was cut at the window edge and its ends
+       read as arrivals and departures that never happened.
+
+       The window is a display range. It decides what is drawn, listed and
+       scored, never what is inferred. tracksInWindow() is how a caller takes
+       its slice, after the fact. */
 
     /* ---- 1. slice time, and inside each slice group the loads spatially ---
        Two players in different places produce two discs in the same slice, so a
@@ -361,7 +336,6 @@ window.DV = window.DV || {};
        fed only by isometric tiles is marked as the looser estimate it is. */
     var pts = opts.worldPoints || worldPoints(model, opts.mapConfigs, opts);
     var nodes = [];
-    var i = M.lowerBound(pts, from, "ms");
     var slice = [], sliceStart = null;
 
     function flushSlice() {
@@ -411,7 +385,7 @@ window.DV = window.DV || {};
 
            Trimming the span to 5-95% is worse (106 blocks), not better -- the
            extreme points are exactly the ones that pin the disc edge. */
-        var chunks = new Map(), fresh = new Map(), maps = {};
+        var chunks = new Map(), maps = {};
         var sw = 0;
         var minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
         for (var k = 0; k < grp.length; k++) {
@@ -422,7 +396,6 @@ window.DV = window.DV || {};
           if (grp[k].z > maxZ) maxZ = grp[k].z;
           var ck = Math.floor(grp[k].x / 16) + "," + Math.floor(grp[k].z / 16);
           chunks.set(ck, true);
-          if (grp[k].fresh) fresh.set(ck, true);
           maps[grp[k].map] = (maps[grp[k].map] || 0) + 1;
         }
         var cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
@@ -431,9 +404,6 @@ window.DV = window.DV || {};
         nodes.push({
           ms: sliceStart + sliceMs / 2, cx: cx, cz: cz,      // WORLD blocks
           tiles: grp.length, chunks: chunks.size, maps: maps,
-          // Chunks that went from unloaded to loaded here -- the moving edge of
-          // somebody's view distance, as opposed to ground already held open.
-          frontier: fresh.size, chunkKeys: Array.from(chunks.keys()),
           radius: grp.length ? rad / grp.length : 0,          // blocks
           /* NOT the formal sqrt(1/sum-weights): that says 2 blocks with fifteen
              8-block tiles, while the three known positions of the calibration
@@ -463,9 +433,8 @@ window.DV = window.DV || {};
       slice = [];
     }
 
-    for (; i < pts.length; i++) {
+    for (var i = 0; i < pts.length; i++) {
       var t = pts[i];
-      if (t.ms > to) break;
       if (kinds !== "all" && t.kind && t.kind !== kinds) continue;
       // .ms, not .tileMs: these are world points from any map, not flat tiles.
       var bucket = Math.floor(t.ms / sliceMs) * sliceMs;
@@ -474,10 +443,6 @@ window.DV = window.DV || {};
       slice.push(t);
     }
     flushSlice();
-
-    /* ---- 1b. throw out the ground that is merely being held open ------- */
-    var held = findHeldSites(nodes, clusterRadius, opts, sliceMs);
-    nodes = held.nodes;
 
     /* ---- 2. link centroids across slices into tracks ------------------- */
     var open = [], done = [], nextId = 1;
@@ -495,13 +460,6 @@ window.DV = window.DV || {};
       }
       var best = null, bestD = Infinity;
       for (k2 = 0; k2 < open.length; k2++) {
-        /* Held ground never joins a journey. Without this the linker happily
-           steps farm -> player -> farm, which is where the 1,100-block minute
-           legs came from: it is not that the gate was too loose, it is that one
-           of the two endpoints was never a person. A held track may only extend
-           itself, and only within its own site. */
-        if (!!open[k2].held !== !!nd.held) continue;
-        if (nd.held && open[k2].episode !== nd.episode) continue;
         var elapsed = Math.max(1, (nd.ms - open[k2].lastMs) / sliceMs);
         var d = Math.hypot(nd.cx - open[k2].lastTx, nd.cz - open[k2].lastTz);
         if (d <= maxStep * elapsed && d < bestD) { bestD = d; best = open[k2]; }
@@ -509,8 +467,7 @@ window.DV = window.DV || {};
       if (!best) {
         best = { id: nextId++, points: [], startMs: nd.ms, lastMs: nd.ms,
                  lastTx: nd.cx, lastTz: nd.cz, minTx: nd.cx, maxTx: nd.cx,
-                 minTz: nd.cz, maxTz: nd.cz, dist: 0, chunks: 0,
-                 held: !!nd.held, episode: nd.episode, site: nd.site };
+                 minTz: nd.cz, maxTz: nd.cz, dist: 0, chunks: 0 };
         open.push(best);
       } else {
         best.dist += bestD;
@@ -553,8 +510,6 @@ window.DV = window.DV || {};
       for (var a2 = 0; a2 < done.length; a2++) {
         for (var b2 = a2 + 1; b2 < done.length; b2++) {
           var A = done[a2], B = done[b2];
-          // Same rule as the linker: held ground and a player are not one thing.
-          if (!!A.held !== !!B.held) continue;
           var overlap = Math.min(A.lastMs, B.lastMs) - Math.max(A.startMs, B.startMs);
           if (overlap <= 0) continue;
           var pa = meanPos(A), pb = meanPos(B);
@@ -617,16 +572,12 @@ window.DV = window.DV || {};
       tr.loadRadiusBlocks = Math.round(rsum / tr.points.length);
       tr.speedBlocksPerSec = tr.durationMs > 0 ? tr.blocksTravelled / (tr.durationMs / 1000) : 0;
     });
-    attributeTracks(tracks, model, opts, sliceMs, held.sites);
+    attributeTracks(tracks, model, opts, sliceMs);
 
     // Settle the path before reading anything off it, then label every leg and
     // lift the impossible ones out as events.
     tracks.forEach(function (tr) { steadyPath(tr, opts); });
     tracks.forEach(function (tr) { annotateTrack(tr, model, opts); });
-    /* Carried on the array rather than wrapped in an object: every caller
-       already treats the return value as the track list. */
-    tracks.heldSites = held.sites;
-    tracks.sites = held.allSites;
     return tracks;
   }
 
@@ -754,8 +705,6 @@ window.DV = window.DV || {};
      and so on to a fixed point. That is how a busy evening resolves -- not from
      the middle, but inward from whoever left first.
 
-     Held ground takes no name at all. It is not a person, and letting it
-     consume a candidate would push a real track onto the wrong player.
      ======================================================================== */
 
   /* How close a track's end has to sit to a leave before the two are treated as
@@ -764,12 +713,11 @@ window.DV = window.DV || {};
      before logging out. This only ever ADDS evidence; it never eliminates. */
   var EDGE_WINDOW_MS = 300000;
 
-  function attributeTracks(tracks, model, opts, sliceMs, heldSites) {
+  function attributeTracks(tracks, model, opts, sliceMs) {
     opts = opts || {};
     var edge = opts.edgeWindowMs === undefined ? EDGE_WINDOW_MS : opts.edgeWindowMs;
     var snaps = model.snapshots || [];
     var free = [];
-    var places = heldPlaces(heldSites);
 
     /* Viability is decided against each player's ONLINE INTERVAL, not by
        intersecting the rosters attached to the track's points. Point-wise
@@ -787,7 +735,6 @@ window.DV = window.DV || {};
     tracks.forEach(function (tr) {
       tr.candidates = []; tr.viable = []; tr.player = null; tr.confident = false;
       tr.attribution = "";
-      if (tr.held) return;                       // a place, not a person
       free.push(tr);
 
       var lo = tr.startMs + slack, hi = tr.lastMs - slack;
@@ -851,43 +798,40 @@ window.DV = window.DV || {};
        at Jaune four minutes later, and the leftover track 6,441 blocks away was
        confidently assigned to them.
 
-       So an assignment has to answer for the geometry. But "too fast to be
-       real" is NOT a speed limit, and saying so was wrong: an ender pearl
-       parked in a stasis chamber crosses any distance instantly, so 11,000
-       blocks in ninety seconds is perfectly ordinary play. What it is not is
-       UNCONDITIONAL -- a pull needs a chamber at the far end, and a chamber is
-       a loaded chunk holding an entity, which is to say it is held ground and
-       this pass has already found it. So:
+       So an assignment has to answer for the geometry: arriving faster than
+       anything can travel is refused.
 
-         * arriving somewhere held, at any speed, is allowed. That is what a
-           stasis pull looks like from outside, and refusing it would throw
-           away real movement;
-         * arriving on open ground faster than anything can travel is refused,
-           because there is nothing there to have pulled them.
+       KNOWN COST, ACCEPTED. A pearl parked in a stasis chamber crosses any
+       distance instantly, so some refusals here are refusing real movement.
+       There used to be an exemption for it -- a chamber is a loaded chunk
+       holding an entity, so the chunk-loader pass had already located every
+       chamber in use, and arriving on ground that pass called "held" was
+       allowed at any speed. That exemption is gone with the pass: from renders
+       alone a chunk loader and a player standing in one place are the same
+       thing, so "this ground was held" was never established, and a stasis
+       exemption resting on it let any fast jump through wherever somebody
+       happened to have stood still. Refusing all of them loses a few genuine
+       pulls and keeps out the rest.
 
-       The case that started this survives the correction: the pale-oak forest
-       ran at 1.27 renders per chunk, nobody was holding it, and there is no
-       mechanism that puts a player in the middle of it ninety seconds after
-       they were 11,000 blocks away. */
+       The case that motivated the check is unaffected: nothing puts a player
+       in the middle of the pale-oak forest ninety seconds after they were
+       11,000 blocks away. */
     var maxBps = opts.maxAttributionBps === undefined ? 80 : opts.maxAttributionBps;
     function reachable(tr, name) {
       for (var i = 0; i < free.length; i++) {
         var u = free[i];
         if (u === tr || u.player !== name || !u.points.length) continue;
-        var gapMs, d, arrival;
+        var gapMs, d;
         if (u.lastMs <= tr.startMs) {
           gapMs = tr.startMs - u.lastMs;
           d = Math.hypot(tr.points[0].tx - u.lastTx, tr.points[0].tz - u.lastTz);
-          arrival = tr.points[0];
         } else if (u.startMs >= tr.lastMs) {
           gapMs = u.startMs - tr.lastMs;
           d = Math.hypot(u.points[0].tx - tr.lastTx, u.points[0].tz - tr.lastTz);
-          arrival = u.points[0];
         } else {
           return false;                       // overlapping in time: one person, one place
         }
         if (d / Math.max(1, gapMs / 1000) <= maxBps) continue;
-        if (onHeldGround(places, arrival.tx, arrival.tz, arrival.ms)) continue;
         return false;
       }
       return true;
@@ -996,65 +940,25 @@ window.DV = window.DV || {};
   }
 
   /* ==========================================================================
-     STASIS CHAMBERS
+     WHAT WENT WITH THE CHUNK-LOADER PASS
      --------------------------------------------------------------------------
-     A pearl parked in a stasis chamber is an entity sitting in a loaded chunk,
-     so a chamber is a chunk loader by construction -- which means the held-site
-     pass has already located every one of them that gets used, without knowing
-     it was looking. The signature is then simply: somebody appears at held
-     ground, instantly, from far enough away that nothing else explains it.
+     There used to be a stasis-chamber detector here. It rested entirely on the
+     held-ground pass: a parked pearl is an entity in a loaded chunk, so every
+     chamber in use was already in the held-site list, and the signature was
+     "somebody appears on held ground, instantly, from far enough away that
+     nothing else explains it".
 
-     That is a positive inference, not a nuisance to be filtered. Over this log
-     50 of 126 inter-track jumps land within 256 blocks of held ground, and the
-     fastest of them land within 75-120 blocks of it -- inside the position
-     error, i.e. on it. Several places take repeat arrivals: (2043,-4770) three
-     times, (-924,4594), (173,-1343) and (-733,-906) twice each. A place people
-     keep materialising at, which is being kept loaded, is a chamber.
+     It went out with the pass it was built on, because the premise did not
+     hold. From renders alone there is no separating a chunk loader from a
+     player who stopped moving -- both are a fixed patch that keeps re-rendering
+     -- so "this ground was being held" was a guess, and every finding stacked
+     on it inherited the guess. A chamber inferred from ground that was really
+     just somebody's base is not a chamber, and the label read as evidence.
 
-     The honest alternative stays on the record: a nether crossing that works
-     out arithmetically is still reported as one, because at 60-second slices an
-     instant arrival and a minute of nether travel are not distinguishable by
-     timing alone. What distinguishes them is where you land -- a portal is not
-     necessarily held ground, a chamber necessarily is.
+     Nothing replaces it for now. A jump with no accounting is reported as the
+     unexplained jump it is, which is the honest reading of a signal that cannot
+     see entities.
      ======================================================================== */
-
-  /* How close to a held place counts as landing ON it. The position estimate
-     carries about 86 blocks of error and the site itself is a few hundred
-     across, so this is "within the place", not "near it". */
-  var HELD_LANDING_BLOCKS = 256;
-
-  /* Held EPISODES collapse onto the places they happened at: the same chamber
-     used on three days is one chamber, and its repeat count is the evidence. */
-  function heldPlaces(heldSites) {
-    var by = new Map();
-    for (var i = 0; i < (heldSites || []).length; i++) {
-      var ep = heldSites[i], k = ep.site.id;
-      if (!by.has(k)) by.set(k, { cx: ep.site.cx, cz: ep.site.cz, windows: [], arrivals: [] });
-      by.get(k).windows.push([ep.firstMs, ep.lastMs]);
-    }
-    return Array.from(by.values());
-  }
-
-  /* On held ground, at a moment that ground was actually being held. The time
-     test matters: a place is only a chunk loader while it is switched on, and
-     the same coordinates can be an ordinary base the week before. */
-  function onHeldGround(places, x, z, ms) {
-    return !!heldPlaceAt(places, x, z, ms);
-  }
-
-  function heldPlaceAt(places, x, z, ms) {
-    for (var i = 0; i < (places || []).length; i++) {
-      var p = places[i];
-      if (Math.hypot(p.cx - x, p.cz - z) > HELD_LANDING_BLOCKS) continue;
-      if (ms === undefined) return p;
-      for (var w = 0; w < p.windows.length; w++) {
-        // one slice of slack either side: an arrival can precede the first
-        // render the place produces after being switched on
-        if (ms >= p.windows[w][0] - 120000 && ms <= p.windows[w][1] + 120000) return p;
-      }
-    }
-    return null;
-  }
 
   /* Every stretch each player was continuously online, from the snapshots.
      A truncated sample (the server capping its name list) is not a disconnect,
@@ -1118,229 +1022,31 @@ window.DV = window.DV || {};
   }
 
   /* ==========================================================================
-     CHUNK LOADERS, AND WHY THE ROSTER IS ENOUGH TO FIND THEM
+     CHUNK LOADERS: WHY THERE IS NO LONGER A PASS FOR THEM
      --------------------------------------------------------------------------
-     A chunk loader (or spawn chunks, or any farm someone left running) keeps a
-     patch of world loaded with nobody near it, so it renders forever from a
-     fixed spot. Those renders are indistinguishable from a stationary player
-     LOCALLY -- and that is what was wrecking the tracks: one player online, two
-     places rendering, and the linker dutifully walking a path back and forth
-     between them every minute.
+     A chunk loader, spawn chunks, or a farm left running keeps a patch of world
+     loaded with nobody near it, so it renders forever from a fixed spot. There
+     was a pass here that tried to find those places and lift them out of the
+     tracks, by arguing from the roster: if a 60-second slice held more separated
+     places than the server had people, the surplus was not people, and the
+     surplus was taken to be whichever place was re-drawing ground it already
+     had rather than discovering new ground.
 
-     The observation that settles it, and it is the user's: a loader cannot
-     switch itself on. Something has to load it once, and after that it stays
-     up whether anyone is there or not. So within a stretch of log:
+     It is removed, and the reason is the one that was there all along in the
+     first sentence: those renders are indistinguishable from a stationary
+     player. A machine holding a patch open and a person standing in their base
+     produce the same signal, and every gate added to tell them apart -- repeat
+     rate, vote counts, a 60% loss rate, per-visit episodes -- was tuning the
+     odds of a coin toss, not deciding it. When it guessed wrong it did not
+     degrade quietly: it took a player's own base, called it a machine, and
+     removed that person's real movement from the record. Whole visits vanished
+     into a dashed ring.
 
-       * a patch that is only active for PART of a session, discovering chunks
-         it has not seen before, is a player -- they arrived and left;
-       * a patch still going while the fresh loading is demonstrably somewhere
-         else, when only one person is online, is being held open. It cannot be
-         the player, because the player is over there.
-
-     Counting is what makes it falsifiable: if a slice has more active places
-     than the server has people, the surplus is not people. Rank the places by
-     how much NEW ground each is loading and the surplus is the ones re-drawing
-     chunks they already had.
-
-     Worked example, 2026-07-27, blocdac alone from 12:04 to 13:03:
-
-       (3900,-2900)   88 renders over 22 chunks (4.0 each) spread across the
-                      whole 54 minutes -- a base, held open
-       (4020,-4020)   63 renders over 34 chunks (1.9 each) in two bursts
-       (3100,-3800)   33 renders over 30 chunks (1.1 each) inside 3 minutes
-       (-3300,5100)   186 renders over 133 chunks (1.4 each) in 10 minutes,
-                      the pale-oak forest -- someone walking through it
-
-     The first is a holder and the rest are a player moving. Before this, the
-     model read all four as one person and drew 7,600 blocks of imaginary
-     pacing; the tracks in that hour travelled 800-2,200 blocks each without
-     leaving a 200-block box.
-
-     ONCE HELD, ALWAYS HELD -- retroactively. The evidence usually arrives after
-     the fact: at 12:04 there is nothing to compare (3900,-2900) against, and
-     only at 12:23, when the player turns up 1,100 blocks away, does the first
-     twenty minutes become interpretable. So the votes are counted over the
-     whole window first and applied backwards, which is the only ordering that
-     uses what the log actually knows.
-
-     WHAT IS KEPT. The activation itself: a loader had to be loaded by someone,
-     so the first couple of slices at a site are a real visit and stay. It is
-     the sustained afterwards that is thrown out.
+     Wrong tracks are visible and can be argued with. Deleted ones cannot. So
+     the renders stay in, a base that someone is standing in reads as a person
+     standing in it, and a farm left running reads as a person too -- which is
+     wrong, but wrong in the direction that keeps the evidence on the page.
      ======================================================================== */
-
-  /* How far apart two active patches have to be before the roster argument can
-     be made at all. One player's loads sit a median 86 blocks from their centre
-     and the disc wanders another hundred or so between slices, so anything
-     inside a few hundred blocks is one person and the merge pass downstream
-     will fold it. 512 is well outside that, and the contradiction it flags --
-     two places, one player -- is then a real one. Voting at the 176-block
-     clustering radius instead accused players of being their own chunk loaders:
-     it condemned the pale-oak sweep's own trailing fragment. */
-  var SITE_SEPARATION = 512;
-  /* A site has to be RE-drawing ground it already holds before "held" is even on
-     the table, whatever the roster says. Measured on the 2026-07-27 sessions,
-     renders per distinct chunk separates the two populations without ambiguity:
-
-         (3900,-2900)  4.0   base held open all session
-         (650,-1700)   3.1   base, occupied
-         (4020,-4020)  1.9   player, two visits
-         (-3300,5100)  1.4   player walking through the pale-oak forest
-         (3100,-3800)  1.1   player crossing at speed
-
-     Below 2 the site is mostly discovering new ground, which no chunk loader
-     does -- a loader's chunks are already loaded, that is the entire point. This
-     guard is what stops a long exploration session being demoted because it
-     happened to be the quieter of two places for a couple of minutes. */
-  var HELD_REPEAT_RATE = 2.0;
-  /* How many separate slices have to say so. One slice is a coincidence --
-     two players can trade places for a minute. Repetition is not. */
-  var HELD_MIN_VOTES = 2;
-  /* A site is judged per VISIT, not once for all time, and this is the quiet
-     gap that ends a visit.
-
-     Getting this wrong is not a tuning detail, it is the difference between
-     the feature working and destroying the data. Judged globally, a place
-     someone has stood in for four days accumulates a vote sooner or later --
-     one busy evening where it was the quieter of two places is enough -- and
-     the verdict then reaches back and demotes every visit they ever made to
-     their own base. That is what happened: the whole-log build classified the
-     calibration site as held ground and the harness went from placing 9 of 11
-     ground-truth points to 0.
-
-     Per visit, the same site can be a player on Saturday and a machine left
-     running on Sunday, which is what it actually is. 15 minutes: long enough
-     that a lull in a session does not split it, short enough that two visits a
-     day apart are never one. */
-  var EPISODE_GAP_MS = 900000;
-
-  function findHeldSites(nodes, radius, opts, sliceMs) {
-    opts = opts || {};
-    if (opts.heldSites === false) return { nodes: nodes, sites: [] };
-    var minVotes = opts.heldMinVotes === undefined ? HELD_MIN_VOTES : opts.heldMinVotes;
-    var repeat = opts.heldRepeatRate === undefined ? HELD_REPEAT_RATE : opts.heldRepeatRate;
-    var sep = opts.siteSeparation === undefined ? SITE_SEPARATION : opts.siteSeparation;
-    var episodeGap = opts.episodeGapMs === undefined ? EPISODE_GAP_MS : opts.episodeGapMs;
-    var activationMs = opts.activationMs === undefined ? sliceMs * 2 : opts.activationMs;
-
-    /* ---- a site is a place that keeps being active, across slices --------
-       Nearest-centre assignment rather than single linkage: over days of log,
-       linkage chains one busy area into the next until the whole inhabited
-       half of the map is one "site" and nothing can be compared to anything. */
-    var sites = [];
-    for (var i = 0; i < nodes.length; i++) {
-      var nd = nodes[i], best = null, bestD = sep / 2;
-      for (var s = 0; s < sites.length; s++) {
-        var d = Math.hypot(nd.cx - sites[s].cx, nd.cz - sites[s].cz);
-        if (d <= bestD) { bestD = d; best = sites[s]; }
-      }
-      if (!best) {
-        best = { id: sites.length + 1, cx: nd.cx, cz: nd.cz, n: 0,
-                 firstMs: nd.ms, lastMs: nd.ms, episodes: [] };
-        sites.push(best);
-      }
-      best.n++;
-      best.cx += (nd.cx - best.cx) / best.n;      // running mean
-      best.cz += (nd.cz - best.cz) / best.n;
-      if (nd.ms < best.firstMs) best.firstMs = nd.ms;
-      if (nd.ms > best.lastMs) best.lastMs = nd.ms;
-      nd.site = best;
-
-      /* ---- and which VISIT to the site this is ----------------------------
-         Nodes arrive in time order, so the open episode is always the last one. */
-      var ep = best.episodes[best.episodes.length - 1];
-      if (!ep || nd.ms - ep.lastMs > episodeGap) {
-        ep = { site: best, cx: nd.cx, cz: nd.cz, n: 0, renders: 0, chunkSet: new Set(),
-               firstMs: nd.ms, lastMs: nd.ms, votes: 0, frontier: 0, held: false };
-        best.episodes.push(ep);
-      }
-      ep.n++;
-      ep.renders += nd.tiles;
-      ep.frontier += nd.frontier;
-      for (var c = 0; c < nd.chunkKeys.length; c++) ep.chunkSet.add(nd.chunkKeys[c]);
-      ep.cx += (nd.cx - ep.cx) / ep.n;
-      ep.cz += (nd.cz - ep.cz) / ep.n;
-      ep.lastMs = nd.ms;
-      nd.episode = ep;
-    }
-    var episodes = [];
-    for (s = 0; s < sites.length; s++) {
-      for (var e = 0; e < sites[s].episodes.length; e++) {
-        var epi = sites[s].episodes[e];
-        epi.chunks = epi.chunkSet.size;
-        epi.repeatRate = epi.renders / Math.max(1, epi.chunks);
-        epi.chunkSet = null;                       // done with it; do not retain
-        episodes.push(epi);
-      }
-    }
-
-    /* ---- more places than people: the surplus is not people ------------- */
-    var bySlice = new Map();
-    for (i = 0; i < nodes.length; i++) {
-      if (!bySlice.has(nodes[i].ms)) bySlice.set(nodes[i].ms, []);
-      bySlice.get(nodes[i].ms).push(nodes[i]);
-    }
-    bySlice.forEach(function (grp) {
-      /* By SITE, not by node. One player's disc regularly fragments into two or
-         three nodes in a slice (that is what the merge pass downstream is for),
-         and counting those fragments as separate places would accuse a player
-         of being their own chunk loader. */
-      var perSite = new Map();
-      for (var j = 0; j < grp.length; j++) {
-        var st = grp[j].site, pe = perSite.get(st);
-        if (!pe) { pe = { site: st, episode: grp[j].episode, frontier: 0 }; perSite.set(st, pe); }
-        pe.frontier += grp[j].frontier;
-      }
-      var places = Array.from(perSite.values());
-      /* The roster is the constraint. A null count (before the first player
-         snapshot) is not evidence of an empty server, and a zero count still
-         has to allow one place -- the render queue drains for a minute or so
-         after the last player leaves. */
-      var online = grp[0].online;
-      var allow = Math.max(1, online === null || online === undefined ? 1 : online);
-      if (places.length <= allow) return;
-      places.sort(function (a, b) {
-        // most new ground first; tie-break toward the visit that only just
-        // started, since a holder by definition has been going a while
-        return b.frontier - a.frontier || b.episode.firstMs - a.episode.firstMs;
-      });
-      /* Everything past the head-count loses. No margin is demanded on the
-         frontier counts themselves: at 60s slices a place contributes one to
-         four new chunks and the two candidates are routinely tied, so requiring
-         the loser to be clearly quieter (an earlier version wanted half) meant
-         the vote almost never fired -- the (3900,-2900) base scored zero votes
-         across the very hour it was demonstrably holding itself open. The tie
-         is broken on age instead, which is the actual physics: whichever place
-         has been going longer is the one that had time to be switched on. What
-         keeps this from condemning quiet players is the repeat-rate gate below,
-         not the margin. */
-      for (j = allow; j < places.length; j++) places[j].episode.votes++;
-    });
-
-    var heldSites = [];
-    for (i = 0; i < episodes.length; i++) {
-      if (episodes[i].votes >= minVotes && episodes[i].repeatRate >= repeat) {
-        episodes[i].held = true; heldSites.push(episodes[i]);
-      }
-    }
-
-    /* ---- apply it, backwards over the whole window ----------------------
-       MARKED, NOT DELETED. Deleting held nodes outright was the first attempt
-       and it threw away something real: a site being held means its renders do
-       not prove anyone is standing there, not that nothing happened. What has
-       to stop is the LINKING -- a path that steps from a farm to a player and
-       back every minute is the fiction. So held nodes stay, and the linker
-       below refuses to join them to anything but their own site, which leaves
-       them as a stationary blob at a fixed place instead of a leg of somebody's
-       journey. */
-    for (i = 0; i < nodes.length; i++) {
-      var n2 = nodes[i];
-      if (!n2.episode.held) continue;
-      // The visit that switched it on is real; everything after is the machine.
-      if (n2.ms <= n2.episode.firstMs + activationMs) n2.activation = true;
-      else n2.held = true;
-    }
-    return { nodes: nodes, sites: heldSites, allSites: episodes };
-  }
 
   /* ==========================================================================
      HOW a player moved, and the EVENTS between
@@ -1382,8 +1088,6 @@ window.DV = window.DV || {};
   // Not a speed band: assigned when loading stopped long enough that we simply
   // did not observe the movement, however ordinary it may have been.
   var UNOBSERVED = { name: "unobserved", note: "no loads for a while -- they were still, elsewhere, or in another dimension" };
-  // Also not a speed band: ground held loaded by something other than presence.
-  var HELD = { name: "held", note: "a place being kept loaded -- renders here locate the loader, not a player" };
 
   function classifySpeed(bps) {
     for (var i = 0; i < MODES.length; i++) if (bps < MODES[i].max) return MODES[i].name;
@@ -1403,22 +1107,6 @@ window.DV = window.DV || {};
     var gapMs = opts.stationaryGapMs === undefined ? Math.max(45000, slice * 1.75) : opts.stationaryGapMs;
     var portals = opts.portals || null;
     var legs = [], events = [], modeTime = {};
-
-    /* Ground someone is holding open. The renders wander a couple of hundred
-       blocks around the site as different corners of it tick, and reading that
-       wander as walking is exactly the mistake this whole pass exists to stop.
-       One mode, no speeds, no events. */
-    if (tr.held) {
-      for (var h = 1; h < tr.points.length; h++) {
-        var dth = (tr.points[h].ms - tr.points[h - 1].ms) / 1000;
-        legs.push({ ms: tr.points[h - 1].ms, mode: "held", bps: 0, blocks: 0 });
-        modeTime.held = (modeTime.held || 0) + Math.max(0, dth);
-      }
-      tr.legs = legs; tr.events = []; tr.modeTime = modeTime;
-      tr.dominantMode = "held"; tr.movingSec = 0;
-      tr.blocksTravelled = 0;
-      return tr;
-    }
 
     for (var i = 1; i < tr.points.length; i++) {
       var a = tr.points[i - 1], b = tr.points[i];
@@ -1508,14 +1196,9 @@ window.DV = window.DV || {};
     var bpt = model.blocksPerTile;
     var maxGapMs = opts.eventGapMs === undefined ? 600000 : opts.eventGapMs;  // 10 min
     var portals = opts.portals || null;
-    var places = heldPlaces(tracks && tracks.heldSites);
     var out = [];
 
-    /* Held ground has no arrivals and no departures: nobody travelled to or
-       from it, it was simply switched on. Pairing it up manufactures teleports
-       between a farm and whoever happened to be moving next. */
-    var byStart = tracks.filter(function (t) { return !t.held; })
-                        .sort(function (a, b) { return a.startMs - b.startMs; });
+    var byStart = tracks.slice().sort(function (a, b) { return a.startMs - b.startMs; });
     for (var i = 0; i < byStart.length; i++) {
       var a = byStart[i];
       var best = null;
@@ -1555,22 +1238,6 @@ window.DV = window.DV || {};
                                  : "too fast for any overworld travel; a portal pair or a command";
         if (dist <= 50) ev.kind = "pearl";
       }
-      /* Landed on ground something is holding loaded. A stasis chamber is
-         exactly that -- a pearl is an entity and an entity needs its chunk up
-         -- so this is the arrival end of a pull, and it is reported as the
-         mechanism it is rather than being averaged into "teleport". The nether
-         reading above is left in place where the arithmetic supports it; both
-         can be true of the same jump and the reader deserves to see both. */
-      var land = heldPlaceAt(places, ev.toTx, ev.toTz, ev.endMs);
-      if (land && ev.bps > 8) {
-        land.arrivals.push(ev);
-        ev.landsOnHeld = { x: land.cx, z: land.cz, distBlocks: Math.hypot(land.cx - ev.toTx, land.cz - ev.toTz) };
-        ev.kind = "stasis";
-        ev.explains = "arrives on ground being held loaded (" + Math.round(ev.landsOnHeld.distBlocks) +
-          " blocks from its centre) -- a pearl in a stasis chamber keeps its own chunk up, which is what " +
-          "this looks like from outside" + (ev.explains ? "; " + ev.explains : "");
-      }
-
       if (portals) {
         var pFrom = nearestPortal(portals, a.lastTx, a.lastTz);
         var pTo = nearestPortal(portals, ev.toTx, ev.toTz);
@@ -1599,12 +1266,6 @@ window.DV = window.DV || {};
       }
       out.push(ev);
     }
-    /* The places themselves, ranked by how often someone materialised there.
-       One arrival is a jump we could not otherwise explain; three at the same
-       held place, by different people on different days, is a chamber people
-       use -- and that is a fact about the map, not about any one journey. */
-    out.stasisSites = places.filter(function (p) { return p.arrivals.length; })
-      .sort(function (a, b) { return b.arrivals.length - a.arrivals.length; });
     return out;
   }
 
@@ -1636,6 +1297,18 @@ window.DV = window.DV || {};
     return Math.max(12, r * 0.6);
   }
 
+  /* The view window's whole job: which of the tracks the log knows about have
+     anything to say about this range of time. A selection, never a rebuild --
+     the tracks handed in were inferred from everything (see buildTracks), and
+     the ones handed back are those same objects, uncut, so a track that starts
+     before the window still knows where it came from. */
+  function tracksInWindow(tracks, from, to) {
+    if (!tracks) return tracks;
+    var f = isFinite(from) ? from : -Infinity;
+    var t = isFinite(to) ? to : Infinity;
+    return tracks.filter(function (tr) { return tr.lastMs >= f && tr.startMs <= t; });
+  }
+
   /* How well does the track count match the number of people actually online?
      This is the honest scoreboard for the linking parameters above: if the two
      disagree badly, the gates are wrong and the tracks are fiction. */
@@ -1654,9 +1327,11 @@ window.DV = window.DV || {};
         if (tracks[i].startMs <= t && tracks[i].lastMs >= t) active++;
       }
       pts++;
-      sumErr += Math.abs(active - snap.count);
-      if (active === snap.count) agree++;
-      else if (active > snap.count) over++; else under++;
+      /* Scored against snap.online: the defensible head-count, which counts a
+         player the sample named even when the count column left them out. */
+      sumErr += Math.abs(active - snap.online);
+      if (active === snap.online) agree++;
+      else if (active > snap.online) over++; else under++;
     }
     return pts ? { samples: pts, exact: agree / pts, meanAbsErr: sumErr / pts,
                    overCount: over / pts, underCount: under / pts } : null;
@@ -1706,7 +1381,7 @@ window.DV = window.DV || {};
 
   DV.infer = {
     worldToTile: worldToTile, worldPoints: worldPoints, projector: projector, heightBand: heightBand, inferHeights: inferHeights,
-    buildTracks: buildTracks, scoreTracks: scoreTracks,
+    buildTracks: buildTracks, tracksInWindow: tracksInWindow, scoreTracks: scoreTracks,
     annotateTrack: annotateTrack, classifySpeed: classifySpeed, MODES: MODES,
     nearestPortal: nearestPortal, parsePortals: parsePortals, parseHighways: parseHighways,
     linkEvents: linkEvents

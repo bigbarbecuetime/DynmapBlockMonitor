@@ -32,6 +32,11 @@ window.DV = window.DV || {};
      difference between "ignore it" and "there is a hole in your data". */
   var RETENTION_MS = 28000;
 
+  /* What a Mojang username can be: 3-16 characters of letters, digits and
+     underscore. Used to tell a name the server gave us from a placeholder it
+     substituted for one -- see the roster build. */
+  var NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
+
   /* ==========================================================================
      COORDINATE MODEL -- the one place tiles become world coordinates.
      --------------------------------------------------------------------------
@@ -422,13 +427,19 @@ window.DV = window.DV || {};
     /* Occupancy, read straight off the player rows -- needed BEFORE the tiles are
        placed on the timeline, because they are about to be aligned to it. A light
        scan rather than the full snapshot build, which happens further down. */
+    /* Counts the NAMES too, not just the count column: a name in the sample is
+       proof that account was connected, so a sample of one against a count of
+       zero means one person was on. Reading only the count called those moments
+       empty and handed the tiles rendered in them to nobody. */
     var occSnaps = [], occSeen = new Map();
     for (i = 0; i < playerRows.length; i++) {
       var pr = playerRows[i];
       if (pr.event || pr.error || pr.count === "" || pr.count === undefined) continue;
-      var pms2 = parseMs(pr.time);
-      if (!occSeen.has(pms2)) { occSeen.set(pms2, true); occSnaps.push({ ms: pms2, count: parseInt(pr.count, 10) || 0 }); }
+      var pms2 = parseMs(pr.time), occ = occSeen.get(pms2);
+      if (!occ) { occ = { ms: pms2, count: parseInt(pr.count, 10) || 0, named: 0 }; occSeen.set(pms2, occ); occSnaps.push(occ); }
+      if (pr.player) occ.named++;
     }
+    for (i = 0; i < occSnaps.length; i++) occSnaps[i].count = Math.max(occSnaps[i].count, occSnaps[i].named);
     occSnaps.sort(function (a, b) { return a.ms - b.ms; });
     var occupied = occupiedIntervals(occSnaps);
 
@@ -556,8 +567,22 @@ window.DV = window.DV || {};
       if (p.error) { playerErrors.push({ ms: pms, reason: p.error }); continue; }
       if (p.count === "" || p.count === undefined) continue;
       var snap = byTime.get(pms);
-      if (!snap) { snap = { ms: pms, count: parseInt(p.count, 10) || 0, roster: [] }; byTime.set(pms, snap); C.snapshots.push(snap); }
-      if (p.player) snap.roster.push(p.player);
+      if (!snap) { snap = { ms: pms, count: parseInt(p.count, 10) || 0, roster: [], unnamed: [] }; byTime.set(pms, snap); C.snapshots.push(snap); }
+      /* A sample entry that cannot be a username is not one. Mojang usernames are
+         3-16 characters of [A-Za-z0-9_], so "Anonymous Player" -- which this
+         server returned once, alongside a real name, with a count of 2 -- has a
+         space in it and could never be anybody's account. It is the server
+         declining to name someone, which is exactly the fact `truncated` already
+         carries, so route it there: keep the entry OUT of the roster and leave
+         the count alone, and the snapshot reads "2 online, 1 named" on its own.
+
+         The alternative was letting it stand as a player, and it does not stand
+         still: it joins, it leaves, it collects sessions, and attribution will
+         hand it a track that some real person walked. A placeholder cannot own a
+         track. Anything rejected here is named in the data-quality report rather
+         than silently dropped -- if a Geyser server ever puts a Bedrock gamertag
+         through this rule, that is where you will see it. */
+      if (p.player) (NAME_RE.test(p.player) ? snap.roster : snap.unnamed).push(p.player);
     }
     C.playerSeen = playerRows.length;
 
@@ -566,14 +591,29 @@ window.DV = window.DV || {};
       var s = snapshots[i];
       s.roster.sort();
       s.i = i;
+      if (!s.unnamed) s.unnamed = [];   // snapshots cached from an older build
       /* Two independent things can disagree here, and they mean opposite things:
          count > roster  -- the server capped/hid its SLP sample list, so names
                             are missing and a derived "leave" may be an artifact.
-         count < roster  -- the sample still lists someone the count says is gone
-                            (observed on this server at a disconnect boundary);
-                            the snapshot is internally inconsistent. */
-      s.truncated = s.count > s.roster.length;
+         count < roster  -- the count is SHORT of the sample. Not a contradiction
+                            to be split down the middle: a name in the sample is
+                            the server telling us that account was connected, and
+                            it has no reason to invent one. The count is the side
+                            that can be made to lie -- a vanish plugin drops the
+                            admin from the head-count, and this server hides
+                            players from Dynmap the same way (dyncount reads 0
+                            with three people on). Every one of the 61 here is
+                            short by exactly one and lasts exactly one poll. */
+      /* Placeholders count as accounted for: the server did return an entry for
+         that player, it just would not name them, so the sample was not CAPPED.
+         Otherwise one anonymised entry also raised "some players could not be
+         named", reporting one event as two different problems. */
+      s.truncated = s.count > s.roster.length + s.unnamed.length;
       s.overfull = s.count < s.roster.length;
+      /* The head-count we can defend: names are evidence of presence, so the
+         roster is a FLOOR under the count, never a competitor to it. Placeholders
+         count too -- "Anonymous Player" is somebody, just not somebody named. */
+      s.online = Math.max(s.count, s.roster.length + s.unnamed.length);
     }
 
     /* ---- lifecycle -> coverage intervals ------------------------------ */
@@ -615,6 +655,10 @@ window.DV = window.DV || {};
       bounds.minMs = Math.min(bounds.minMs, tiles[0].tileMs);
       bounds.maxMs = Math.max(bounds.maxMs, tiles[tiles.length - 1].tileMs);
     }
+    /* The newest ROW, kept separately because extendLive() below can push maxMs
+       past it: in live mode the two answer different questions -- "how far does
+       the timeline reach" and "when did we last actually hear anything". */
+    bounds.dataMaxMs = bounds.maxMs;
 
     var coverage = [], open = null;
     /* Binary search, not a scan: this is called once per lifecycle event, and a
@@ -657,6 +701,7 @@ window.DV = window.DV || {};
       open.endMs = isFinite(bounds.maxMs) ? bounds.maxMs : open.startMs;
       open.complete = false;
       open.endReason = "still running / not yet stopped";
+      open.open = true;                  // the only run extendLive() may move
       coverage.push(open);
     }
     // No lifecycle rows at all (someone loaded a hand-trimmed CSV): assume the
@@ -665,9 +710,103 @@ window.DV = window.DV || {};
       coverage.push({ startMs: bounds.minMs, endMs: bounds.maxMs, complete: false, endReason: "no start/stop markers in file" });
     }
 
+    /* ==========================================================================
+       COVERAGE ON THE CORRECTED CLOCK
+       --------------------------------------------------------------------------
+       The intervals above are host-clock facts about the tracker PROCESS: it was
+       up from this start marker until that stop marker. But everything the viewer
+       DRAWS sits on the corrected clock -- a tile is plotted at
+       renderMs - renderDelayMs, which is skew + queue depth EARLIER than the poll
+       that found it. So a run's first tiles land before its own start marker, and
+       asking the raw interval "were you running then?" answered NO about rows the
+       tracker itself wrote. On this log that was 426 tiles drawn as bars sitting
+       on top of the "tracker not running" hatch, with the tile panel calling them
+       "outside a tracker run" and the Now panel reporting changes at a moment it
+       said nothing was recorded.
+
+       The observation window genuinely does open before the start marker, and by
+       a knowable amount: Dynmap's since-feed hands the first poll its whole ~28s
+       buffer, and the chunk load that a render is evidence of happened
+       renderDelayMs before the render. So in corrected time a run covers from
+       startMs - (retention + renderDelayMs). Here that bound is 101s against a
+       worst observed overhang of 97s -- it explains every one of those tiles
+       without claiming coverage past what the feed can actually deliver.
+
+       The end needs no such shift: a tile is always plotted before the poll that
+       caught it, so nothing overhangs a stop marker.
+
+       Runs whose lookbacks overlap merge, which is what this log's 2-4s
+       stop/start restart pairs always physically were. Merging matters because
+       callers sum these intervals to measure off-time, and overlapping ones would
+       count the same second twice.
+       ======================================================================== */
+    var lookbackMs = retention + renderDelayMs;
+    var dataCoverage = [];
+    for (i = 0; i < coverage.length; i++) {
+      coverage[i].dataStartMs = coverage[i].startMs - lookbackMs;
+      var tail = dataCoverage[dataCoverage.length - 1];
+      if (tail && coverage[i].dataStartMs <= tail.endMs) {
+        if (coverage[i].endMs > tail.endMs) tail.endMs = coverage[i].endMs;
+      } else {
+        dataCoverage.push({ startMs: coverage[i].dataStartMs, endMs: coverage[i].endMs });
+      }
+    }
+
+    /* Binary search, not the scan this replaced: covered() is called once per
+       tile on every rebuild and once per hovered pixel, and a log with 53 runs
+       paid all 53 comparisons every time. */
     function covered(ms) {
-      for (var j = 0; j < coverage.length; j++) if (ms >= coverage[j].startMs && ms <= coverage[j].endMs) return true;
-      return false;
+      var lo = 0, hi = dataCoverage.length;
+      while (lo < hi) { var mid = (lo + hi) >> 1; if (dataCoverage[mid].startMs <= ms) lo = mid + 1; else hi = mid; }
+      var c = dataCoverage[lo - 1];
+      return !!c && ms <= c.endMs;
+    }
+
+    /* ==========================================================================
+       THE LIVE EDGE
+       --------------------------------------------------------------------------
+       Every interval above ends at a logged row, because a row is the only proof
+       the model has. That makes the newest row the end of the world, which is
+       wrong while the tracker is still up: it writes NOTHING when a poll finds
+       nothing changed, so a quiet hour and a dead tracker look identical in the
+       file. The viewer, tailing that file, knows something the file does not --
+       that time is passing and the run has no stop marker yet -- and this is
+       where it says so.
+
+       Only a run still marked open may be extended, and only forward. If the
+       tracker did die in that silence the claim is wrong until its next start
+       writes "closed without warning", which retro-closes the run at its last
+       real row -- the correction is already in the lifecycle handling above, so
+       the mistake is temporary and self-repairing. A cleanly stopped run is never
+       extended: it said when it ended.
+
+       Mutates in place rather than rebuilding, because it is called on every live
+       poll and a rebuild of this log costs ~380 ms of full passes to move one
+       number. covered() and uncoveredMs() read the same array objects, so they
+       follow along. */
+    function extendLive(ms) {
+      if (!isFinite(ms) || !(ms > bounds.maxMs)) return false;
+      var last = coverage[coverage.length - 1];
+      if (!last || !last.open) return false;
+      bounds.maxMs = ms;
+      last.endMs = ms;
+      var tail = dataCoverage[dataCoverage.length - 1];
+      if (tail) tail.endMs = ms;
+      return true;
+    }
+
+    /* Milliseconds between a and b that no run covers. The one implementation of
+       this: the panels and the timeline tooltip both need it, and both used to
+       decide "was anything recorded here?" from a single instant, which is how a
+       bucket spanning an outage could show bars and call itself unrecorded. */
+    function uncoveredMs(aMs, bMs) {
+      if (!(bMs > aMs)) return 0;
+      var on = 0;
+      for (var j = 0; j < dataCoverage.length; j++) {
+        var s = Math.max(aMs, dataCoverage[j].startMs), e = Math.min(bMs, dataCoverage[j].endMs);
+        if (e > s) on += e - s;
+      }
+      return Math.max(0, (bMs - aMs) - on);
     }
 
     /* ---- poll cadence, inferred rather than assumed ------------------- */
@@ -708,12 +847,18 @@ window.DV = window.DV || {};
       var gapReason = "";
       if (!sameRun(coverage, prev.ms, cur.ms)) gapReason = "tracker was off between samples";
       else if (windowBetween(playerWindows, prev.ms, cur.ms)) gapReason = "player ping errored between samples";
+      /* Checked before the cap, because it is the more specific fact: both end up
+         with fewer names than the count, but one is SLP returning a short sample
+         and the other is the server holding a name back on purpose. */
+      else if (prev.unnamed.length || cur.unnamed.length) gapReason = "the server would not name someone in its own sample";
       else if (prev.truncated || cur.truncated) gapReason = "server capped its player sample list";
-      /* An internally inconsistent snapshot (more names listed than the count
-         claims) is common on this server right at a disconnect: the name sample
-         lags the count by a poll. Diffing against one of those manufactures a
-         leave that is really just the sample catching up, so say so. */
-      else if (prev.overfull || cur.overfull) gapReason = "a snapshot listed more names than its own count";
+      /* NOT a reason any more. A count below the sample used to flag the whole
+         transition as doubtful, which was the model hedging on whether the names
+         were real -- 61 of the 62 question marks in this log came from it. A name
+         is the server naming an account it had connected; it is the count that a
+         vanish plugin or a lagging status reply can understate. So the names are
+         taken at face value, s.online carries the floor they impose, and the
+         transition stands on its own. */
 
       var before = new Set(prev.roster), after = new Set(cur.roster);
       var joined = cur.roster.filter(function (nm) { return !before.has(nm); });
@@ -721,16 +866,18 @@ window.DV = window.DV || {};
       joined.forEach(function (nm) { transitions.push(mkTrans(cur.ms, "join", nm, prev, cur, !!gapReason, gapReason)); });
       left.forEach(function (nm) { transitions.push(mkTrans(cur.ms, "leave", nm, prev, cur, !!gapReason, gapReason)); });
 
-      /* The count can move by more than the named roster explains, because SLP
-         only returns a SAMPLE of names. Record the unexplained remainder instead
-         of dropping it -- requiring both rosters to be empty (the previous test)
-         silently lost every join on a server that caps its sample to a few names.
-         Only trust the arithmetic when names are known to be MISSING, though: on
-         an "overfull" snapshot (count below the number of names listed) the names
-         are the unreliable side, and subtracting them invents phantom players. */
-      var unexplained = (cur.count - prev.count) - (joined.length - left.length);
-      var namesMissing = prev.truncated || cur.truncated || (!cur.roster.length && !prev.roster.length);
-      if (unexplained !== 0 && namesMissing && !prev.overfull && !cur.overfull) {
+      /* The head-count can move by more than the named roster explains, because
+         SLP only returns a SAMPLE of names. Record the unexplained remainder
+         instead of dropping it -- requiring both rosters to be empty (the previous
+         test) silently lost every join on a server that caps its sample to a few
+         names. Done on s.online rather than the raw count, so a count that was
+         merely short of its own sample no longer looks like people arriving: the
+         floor the names impose is already in both terms and cancels. */
+      var unexplained = (cur.online - prev.online) - (joined.length - left.length);
+      var namesMissing = prev.truncated || cur.truncated ||
+                         prev.unnamed.length || cur.unnamed.length ||
+                         (!cur.roster.length && !prev.roster.length);
+      if (unexplained !== 0 && namesMissing) {
         var n = Math.abs(unexplained);
         transitions.push(mkTrans(cur.ms, unexplained > 0 ? "join" : "leave",
           n > 1 ? "(" + n + " unnamed)" : "(unnamed)", prev, cur, true,
@@ -739,9 +886,12 @@ window.DV = window.DV || {};
     }
     transitions.sort(function (x, y) { return x.ms - y.ms; });
 
+    /* The counts shown are the defensible ones. Reading them off the raw column
+       produced rows like "Avery_strab3ry leave 0->0" -- a departure from a server
+       that already claimed to be empty, which is not a thing that can happen. */
     function mkTrans(ms, type, player, prev, cur, uncertain, reason) {
-      return { ms: ms, type: type, player: player, countBefore: prev ? prev.count : 0,
-               countAfter: cur.count, uncertain: uncertain, reason: reason || "" };
+      return { ms: ms, type: type, player: player, countBefore: prev ? prev.online : 0,
+               countAfter: cur.online, uncertain: uncertain, reason: reason || "" };
     }
 
     /* ---- correlate tiles with who was online ------------------------- */
@@ -758,14 +908,20 @@ window.DV = window.DV || {};
       var tm = tiles[i].tileMs;
       while (si + 1 < snapshots.length && snapshots[si + 1].ms <= tm) si++;
       var act = si >= 0 ? snapshots[si] : null;
-      tiles[i].online = act ? act.count : null;
+      tiles[i].online = act ? act.online : null;
       tiles[i].roster = act ? act.roster : [];
       tiles[i].inCoverage = covered(tm);
       if (!tiles[i].inCoverage) stats.outsideCoverage++;
       if (tiles[i].online === 0) stats.whileEmpty++;
     }
     stats.overfullExamples = [];
+    stats.unnamed = 0; stats.unnamedStrings = [];
     for (i = 0; i < snapshots.length; i++) {
+      for (var u = 0; u < snapshots[i].unnamed.length; u++) {
+        stats.unnamed++;
+        var str = snapshots[i].unnamed[u];
+        if (stats.unnamedStrings.indexOf(str) < 0) stats.unnamedStrings.push(str);
+      }
       if (snapshots[i].truncated) stats.truncated++;
       if (snapshots[i].overfull) {
         stats.overfull++;
@@ -791,7 +947,8 @@ window.DV = window.DV || {};
       snapshots: snapshots, transitions: transitions,
       chunkErrors: chunkErrors, playerErrors: playerErrors,
       chunkWindows: chunkWindows, playerWindows: playerWindows,
-      events: events, coverage: coverage, steps: steps, bounds: bounds, stats: stats,
+      events: events, coverage: coverage, dataCoverage: dataCoverage,
+      lookbackMs: lookbackMs, steps: steps, bounds: bounds, stats: stats,
       neighbourMs: neighbourMs,
       blocksPerTile: bpt, retentionMs: retention,
       mapType: mapType, mapTypes: mapTypes, tilesAllMaps: allTiles.length, duplicatesDropped: C.duplicates,
@@ -804,8 +961,11 @@ window.DV = window.DV || {};
               samples: diffs.length, rawMinMs: diffs.length ? diffs[0] : 0,
               rawMedianMs: median(diffs), rawMaxMs: diffs.length ? diffs[diffs.length - 1] : 0 },
       lag: lag,
-      covered: covered
+      covered: covered, uncoveredMs: uncoveredMs, extendLive: extendLive
     };
+    /* Before assess(), so the coverage percentage it reports is measured over the
+       same span the timeline will draw. */
+    if (opts.liveEdgeMs) extendLive(opts.liveEdgeMs);
     model.quality = assess(model);
     return model;
   }
@@ -961,12 +1121,17 @@ window.DV = window.DV || {};
 
     var offMs = 0;
     if (isFinite(m.bounds.minMs)) {
+      /* Measured on the SAME intervals the timeline hatches, so the percentage
+         here and the hatched width there are the same statement. Those are the
+         merged corrected-clock runs, not the raw process ones: what this line
+         claims is how much of the range has data, and the feed's lookback is
+         data. */
       var span = m.bounds.maxMs - m.bounds.minMs, on = 0;
-      for (var i = 0; i < m.coverage.length; i++) on += Math.max(0, m.coverage[i].endMs - m.coverage[i].startMs);
+      for (var i = 0; i < m.dataCoverage.length; i++) on += Math.max(0, m.dataCoverage[i].endMs - m.dataCoverage[i].startMs);
       offMs = Math.max(0, span - on);
       if (offMs > 1000) {
         q.push({ severity: "info", code: "off-time", title: "You are only seeing " + (100 * on / span).toFixed(0) + "% of this time range",
-          detail: "The tracker was off for " + fmtDur(offMs) + " of the " + fmtDur(span) +
+          detail: "Nothing was recorded for " + fmtDur(offMs) + " of the " + fmtDur(span) +
           " this file spans, shown hatched on the timeline. Live data is necessarily thin at first; a few hours of history usually reads much better." });
       }
     }
@@ -994,6 +1159,16 @@ window.DV = window.DV || {};
           uniqReasons(m.playerWindows) + "." });
     }
 
+    if (m.stats.unnamed) {
+      q.push({ severity: "serious", code: "placeholder-name",
+        title: "The server refused to name someone " + m.stats.unnamed + " time" + (m.stats.unnamed > 1 ? "s" : ""),
+        detail: "It returned " + m.stats.unnamedStrings.map(function (s) { return '"' + s + '"'; }).join(", ") +
+          " in the player sample, which cannot be a username (Mojang allows 3-16 characters of letters, digits and underscore). " +
+          "Somebody was online under it -- and note the head-count INCLUDED them, so this is not the same thing as the short counts above: there the server withheld a player from the count, here it withheld only the name. " +
+          "They are counted and simply not named, and joins or leaves worked out across those moments are marked with a ? . " +
+          "They are left out of the roster on purpose -- a placeholder that collects sessions and gets handed a track would put a real person's movements under a name that is not theirs." });
+    }
+
     var trunc = m.stats.truncated;
     if (trunc) {
       q.push({ severity: "serious", code: "sample-cap",
@@ -1003,18 +1178,21 @@ window.DV = window.DV || {};
 
     var over = m.stats.overfull;
     if (over) {
-      q.push({ severity: "warning", code: "count-below-roster",
-        title: "The server contradicted itself " + over + " time" + (over > 1 ? "s" : ""),
-        detail: "The server's own status reply was internally inconsistent (typically a stale name sample caught right at a disconnect). Trust the names less than the count here: " +
+      q.push({ severity: "info", code: "count-below-roster",
+        title: "The head-count came up short " + over + " time" + (over > 1 ? "s" : ""),
+        detail: "The server named more players than its own count admitted to, always by exactly one and never for longer than a single poll: " +
           m.stats.overfullExamples.map(function (x) { return fmtTime(x.ms) + " (count " + x.count + ", " + x.roster.length + " named)"; }).join(", ") +
-          (over > m.stats.overfullExamples.length ? ", ..." : "") + "." });
+          (over > m.stats.overfullExamples.length ? ", ..." : "") +
+          ". The names are taken as true here and the count is treated as the floor being wrong -- the server has no reason to name an account that was not connected, while a count can be made to understate (a vanish plugin drops the hidden player from it, and this server already hides everyone from Dynmap's own count). Nothing is marked uncertain for it." });
     }
 
     var orphan = m.stats.outsideCoverage;
     if (orphan) {
       q.push({ severity: "warning", code: "tile-outside-coverage",
-        title: orphan.toLocaleString() + " change" + (orphan > 1 ? "s" : "") + " landed just outside a tracker run",
-        detail: "Normal at a start or stop: the map can change a moment before the tracker starts watching and only be picked up afterwards. Worth a look only if this number is large." });
+        title: orphan.toLocaleString() + " change" + (orphan > 1 ? "s" : "") + " sits outside every tracker run",
+        detail: "A change picked up by a run's first poll is expected to predate that run's start marker, and " + fmtDur(m.lookbackMs) +
+          " of that overhang is already allowed for (the feed's " + fmtDur(m.retentionMs) + " buffer plus the " + fmtDur(m.renderDelayMs) +
+          " render queue). These fall outside even that, so their position on the timeline rests on a correction bigger than the mechanism explains. Worth a look only if this number is large." });
     }
 
     var idle = m.stats.whileEmpty;

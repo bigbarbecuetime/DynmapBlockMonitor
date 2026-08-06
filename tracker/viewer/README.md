@@ -80,6 +80,21 @@ requests so each poll transfers the newly appended bytes rather than re-reading 
 file that is already ~1 MB after a day. A row caught half-written is held back
 until its newline arrives; a truncated or rotated file forces a clean re-read.
 
+Live is a **clock, not a bookmark**. The tracker writes nothing when a poll finds
+nothing changed, so the newest row can be an hour behind the present — this server
+went 90 minutes with a player online and not one tile rendered. The cursor
+therefore tracks *now*, not the last row: pressing Live jumps to the present and
+stays there, and each poll moves the leading edge even when no bytes arrived. The
+status pill says `nothing new for 1h 4m` instead of quoting a stale row as if it
+were current, and the open run's coverage extends with the edge so the present
+does not read as "tracker not running" (a run with a `stopped` marker is never
+extended; if the tracker died in the silence, its next start writes `closed
+without warning` and retro-closes the run at its last real row).
+
+Dragging the cursor to the leading edge — or past it, which clamps — means
+*follow*; anywhere else parks it, so inspecting an outage from an hour ago is
+never yanked forward by an append. <kbd>End</kbd> re-pins to the edge.
+
 ---
 
 ## The part that matters: two clocks
@@ -115,6 +130,23 @@ override the offset or switch to raw times under **Time base & correlation**.
 Everything — the heatmap, the timeline histogram, the attribution — uses the
 corrected tile time, never the capture time.
 
+**So does coverage.** The start/stop markers are host-clock facts about the
+tracker *process*, but a tile is drawn at `render − queue delay`, which is
+earlier than the poll that found it. Compare the two directly and a run's own
+first tiles land before its own start marker: the viewer drew them as bars on top
+of its "tracker not running" hatch and called them changes outside any run. The
+observation window really does open before the marker — Dynmap's since-feed hands
+the first poll its whole ~28 s buffer, and the chunk load behind a render happened
+a render-delay earlier — so each run is extended back by
+`retention + render delay` (~84 s here) before anything is asked whether it was
+recorded. Runs whose lookbacks overlap merge, which is what this log's 2–4 s
+restart pairs physically were.
+
+The rule that falls out of it: **nothing claims a moment was unrecorded while
+showing data from it.** "Tracker not running" is only said about a span that is
+unrecorded end to end; a timeline bucket, correlation window, or map window that
+was watched for part of its length says how much of it was off instead.
+
 ## Errors it will tell you about
 
 `players.csv` is a **step function**, not a sample series: rows are written only
@@ -127,9 +159,30 @@ marked uncertain rather than presented as fact:
   errored ping can hide a whole join/leave.
 - **Sample capped** — Server List Ping returns only a *sample* of names, so a
   roster can be incomplete while the count stays right.
-- **Roster contradicts the count** — the server listing more names than its own
-  count admits. This happens on ~15 % of samples in the reference data, right at
-  disconnects, and it manufactures phantom leaves if you trust it.
+- **A placeholder instead of a name** — this server answered once with
+  `Anonymous Player`, which cannot be a username (Mojang allows 3–16 characters
+  of `[A-Za-z0-9_]`). Someone was online under it, so the head-count keeps them
+  and the roster does not: a placeholder that collects sessions would eventually
+  be handed a track that a real person walked.
+
+**A name is evidence; the count is not.** If the server named an account, that
+account was connected — it has no reason to invent one. A count is the side that
+can be made to understate: a vanish plugin drops the hidden player from it, and
+this server already hides everyone from Dynmap's own `currentcount`. So the
+roster is a **floor** under the head-count (`snapshot.online = max(count, named)`)
+and never a competitor to it. In the reference data the count comes up short 61
+times, always by exactly one and never for longer than a single poll. Reading only
+the count column called those moments empty, handed the tiles rendered in them to
+nobody, and produced feed rows like `leave 0→0` — a departure from a server that
+claimed to be empty. That accounted for 61 of the 62 uncertain transitions; 19
+remain, all from a tracker restart, a failed ping, or a withheld name.
+
+The **?** on a join or leave is about the *server's answer*, never about our
+polling. We ask every 10 s and the poll either works or is logged as an error;
+the `?` means the two snapshots either side of that transition could not be
+diffed honestly — the tracker restarted in between, the ping errored, the sample
+was capped, or a name was withheld. 19 of 515 transitions in the reference data
+carry one. Hover it for the specific reason.
 
 For tile data, a poll outage only loses data if it outlasts the feed's ~28 s
 retention buffer, because `tracker.py` does not advance its cursor on a failed
@@ -277,40 +330,37 @@ Together these cut tracks travelling more than 4× their own extent from **20%
 to 1%** and median track travel from 788 to 341 blocks, with the ground-truth
 error unchanged at ~92 blocks mean.
 
-**Held ground is separated out before anything is linked.** A chunk loader, a
-farm someone left running, or spawn chunks keep a patch of world loaded with
-nobody near it, and it renders forever from a fixed spot — locally
-indistinguishable from a stationary player. Untreated, that is what made tracks
-look uncorrelated: one person online, two places rendering, and the linker
-walking a path back and forth between them every minute.
+**A chunk loader reads as a player standing still, and that is now left
+standing.** A loader, a farm someone left running, or spawn chunks keep a patch
+of world loaded with nobody near it, and it renders forever from a fixed spot —
+locally indistinguishable from a stationary player, because a render says a
+chunk was loaded and never says what loaded it.
 
-A loader cannot switch itself on, which is what makes it findable. Something has
-to load it once, and after that it stays up whether anyone is there or not. So
-if a 60-second slice holds more separated places (>512 blocks apart) than the
-server has people, the surplus is not people; rank the places by how many chunks
-each is loading *for the first time* and the loser is the one re-drawing ground
-it already had. Two such votes condemn a **visit** to a site — not the site
-forever, which would demote a player's own base across days, and did: it took
-the calibration harness from placing 9 of 11 ground-truth points to 0.
+There was a pass here that tried to tell the two apart from the roster: if a
+60-second slice held more separated places (>512 blocks apart) than the server
+had people, the surplus was not people, and the surplus was taken to be whichever
+place was re-drawing ground it already had. It is **removed**. Every gate added
+to make it safe — renders per chunk, a minimum vote count, a 60% loss rate,
+per-visit episodes rather than per-site verdicts — was tuning the odds of a coin
+toss rather than deciding it, and the failure mode was not a graceful one: when
+it called a player's base a machine it deleted that person's real movement from
+the record, turning a visit into a dashed ring nobody could argue with. A wrong
+track is visible; a deleted one is not.
 
-The gate that keeps quiet players safe is renders per distinct chunk, which
-separates the two populations cleanly (2026-07-27 sessions):
+So held ground is gone from the model, the map and the track list, and with it
+the **stasis-chamber detector**, which was built entirely on top of it — a parked
+pearl is an entity in a loaded chunk, so every chamber in use was already in the
+held-site list. That inference was only ever as good as the held-site list, and
+the held-site list was a guess. Jumps that used to be labelled `stasis` are now
+reported as the unexplained jumps they are. The attribution geometry loses its
+matching exemption too: arriving faster than 80 blocks/s is refused outright,
+which refuses a few genuine pearl pulls along with everything else.
 
-| place | renders / chunk | what it was |
-|---|---|---|
-| (3900,−2900) | 4.0 | a base held open all session |
-| (650,−1700) | 3.1 | a base, occupied |
-| (4020,−4020) | 1.9 | a player, two visits |
-| (−3300,5100) | 1.4 | a player walking through the pale-oak forest |
-| (3100,−3800) | 1.1 | a player crossing at speed |
-
-Below 2.0 a place is mostly discovering new ground, which no chunk loader does.
-Held visits keep their **activation** — the couple of slices that switched them
-on are a real person arriving — and the rest is drawn as a dashed ring where the
-place is, never joined into anyone's path. Over the whole log this cuts tracks
-that travel more than 4× their own extent from **20% to 11%**, and the worst
-offender from 22,853 blocks of pacing to 11,016, with no change to the
-ground-truth error.
+What this costs, measured on the 7-day log (2026-07-23 to 07-30): tracks that
+travel more than 4× their own extent sit at **15 of 628 (2.4%)** — the path
+settling below is what holds that down, not the loader pass — and the ground
+truth is unchanged at **18 of 20 records placed, median 125 blocks**, the same
+figure the loader pass scored.
 
 Attribution is by **elimination, worked backwards over the finished window**.
 Candidates are the players online for the *whole* span a track covers (compared
@@ -325,61 +375,49 @@ in rounds to a fixed point:
 
 Every assignment removes that name from every track overlapping it in time —
 one person is in one place — which is what lets a busy evening resolve inward
-from whoever left first. Held ground takes no name at all; it is not a person,
-and letting it consume a candidate pushes a real track onto the wrong player.
+from whoever left first.
 
 Every rule also has to answer for the geometry, because two overlapping tracks
 compete for the same names and whichever is assigned first takes one out of play
-for the other. But **"too fast" is not a speed limit**: a pearl parked in a
-stasis chamber crosses any distance instantly, so 11,000 blocks in ninety
-seconds is ordinary play. What it is not is unconditional — a pull needs a
-chamber at the far end, and a chamber is a loaded chunk holding an entity, which
-is to say it is *held ground and this pass has already found it*. So arriving on
-held ground is allowed at any speed; arriving on open ground faster than 80
-blocks/s is refused, because there is nothing there to have pulled them. The
-calibration case survives either way: the pale-oak forest ran at 1.27 renders
-per chunk, nobody was holding it, and nothing puts a player in the middle of it
-ninety seconds after they were 11,000 blocks away.
+for the other: arriving faster than **80 blocks/s** is refused. This is a real
+speed limit and it is known to be slightly wrong — a pearl parked in a stasis
+chamber crosses any distance instantly, so some of what it refuses is ordinary
+play. The exemption that used to cover it (arriving on ground the loader pass
+called *held* was allowed at any speed) went with that pass, because it rested
+on a classification that was never established. The calibration case is
+unaffected: nothing puts a player in the middle of the pale-oak forest ninety
+seconds after they were 11,000 blocks away.
 
-### Stasis chambers
+Linking is by proximity in space and time, **never by the order tiles arrive**.
+The feed is strictly sorted by render-completion time: across 27,812 polls
+(243,426 tiles), the `tile_ts` of consecutive rows within a poll increases 96.3%
+of the time, ties 3.7%, and *never* decreases — every batch of four or more
+tiles is perfectly monotone. Nothing in that ordering carries who joined when.
 
-That last point runs in reverse and becomes a finding rather than a caveat.
-Since a chamber is a chunk loader by construction, the held-site pass has
-already located every chamber that gets used, without knowing that is what it
-was looking for. The signature is then: **somebody appears on held ground,
-instantly, from far enough away that nothing else explains it.** Over this log
-45 of 118 inter-track jumps land within 256 blocks of held ground, and 7 land on
-ground that was demonstrably being held *at the moment of arrival* — the time
-test matters, and it earns its keep: repeat arrivals at (2047,−4752) stay
-labelled `dimension`, because that ground is only ever held during one
-36-minute episode three days earlier. It is a portal room, not a chamber.
-
-What survives reads exactly like chamber use: `CrazyCraftix` pulled to
-(−5157,−1946) twice, six minutes apart; two different players landed on
-(−721,−1124) five minutes apart. Places are ranked by repeat arrivals, since
-one is a jump we could not otherwise account for and three by different people
-on different days is a chamber people share.
-
-The nether reading stays on the record alongside it — at 60-second slices an
-instant arrival and a minute of nether travel are not separable by timing, and
-what tells them apart is *where you land*. A portal need not be held ground; a
-chamber necessarily is.
-
-Linking is by proximity in space and time, never by the order tiles arrive: tiles
-come off the feed sorted by ascending x (perfectly ascending in **92%** of polls
-*within a single second*, where time cannot explain it), so emission order
-measures Dynmap's render loop, not player heading.
+The left-to-right sweep visible on the map is Dynmap's renderer draining its
+dirty-tile set column-major, not a player heading east. Within a burst (four or
+more consecutive tiles inside 4 tiles of each other, n=9,061 bursts) the order is
+**97.0% monotone in x** and 95.2% monotone in (x, z); adjacent steps run east
+9.85:1 over west, and whole bursts end east of where they started 4,525 times
+against 45 west. Two players online simply interleave two such sweeps by
+whichever tile finished rendering first.
 
 The check is the roster: the number of live tracks should match the number of
 people online. It agrees exactly **52%** of the time over the whole log (86% over
 the 2026-07-27 morning), errs low, and overcounts only **1%** of the time — a
 player standing still loads nothing and is invisible here, which is the failure
 worth having. `node tools/tracks.js [from] [to]` prints the tracks and this
-score; `HELD=0` and `STEADY=0` turn the held-ground pass and the path settling
-off for a before/after on one dataset, `SITES=1` lists every site with its
-repeat rate and votes, and `FULL=1` builds over the whole log while printing
-only the given window — which is not the same thing, since attribution resolves
-by elimination across every track in the build.
+score; `STEADY=0` turns the path settling off for a before/after on one dataset.
+
+**Tracks are always built from the whole log**, in the tools and in the viewer
+alike, and the time window only chooses what is shown. This is not a
+performance detail: attribution resolves by elimination across every track in
+the build, and a track is only a track because of what came before and after
+it. Building inside
+a window did not show a slice of the answer, it computed a different one — the
+same evening named fewer players through a narrower window, and every track was
+cut at the window edge with its ends reading as arrivals and departures that
+never happened.
 
 **Height** comes from crossing the maps. A flat tile fixes X and Z but not Y; the
 isometric maps are shot at inclination 30, folding height into their vertical

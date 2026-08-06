@@ -136,7 +136,7 @@ window.DV = window.DV || {};
       for (i = 0; i < m.snapshots.length; i++) {
         var s = m.snapshots[i];
         if (s.ms < st.viewA - 60000 || s.ms > st.viewB + 60000) continue;
-        if (s.count > playerMax) playerMax = s.count;
+        if (s.online > playerMax) playerMax = s.online;
       }
     }
 
@@ -290,7 +290,7 @@ window.DV = window.DV || {};
         var started = false, lastX = null, lastY = null;
         for (var i = 0; i < snaps.length; i++) {
           var s = snaps[i];
-          var x = xOf(s.ms), y = yOf(s.count);
+          var x = xOf(s.ms), y = yOf(s.online);
           if (x < -20) { lastX = x; lastY = y; started = false; continue; }
           if (x > st.w + 20) {
             if (lastY !== null) { ctx.lineTo(st.w, lastY); }
@@ -319,7 +319,7 @@ window.DV = window.DV || {};
           for (i = 0; i < snaps.length; i++) {
             var sx = xOf(snaps[i].ms);
             if (sx < -4 || sx > st.w + 4) continue;
-            var sy = yOf(snaps[i].count);
+            var sy = yOf(snaps[i].online);
             ctx.fillStyle = pal.surface;
             ctx.beginPath(); ctx.arc(sx, sy, 3.5, 0, 6.2832); ctx.fill();  // 2px surface ring
             ctx.fillStyle = pal.players;
@@ -370,7 +370,10 @@ window.DV = window.DV || {};
     function hatchGaps(band, xfn, a, bMs) {
       var m = st.model;
       if (!m) return;
-      var covers = m.coverage;
+      /* The corrected-clock intervals, because that is the axis these bands are
+         drawn against. Hatching the raw process runs instead put the hatch over
+         the first minute or so of every run -- with that run's own bars on it. */
+      var covers = m.dataCoverage;
       var spans = [];
       var prev = a;
       for (var i = 0; i < covers.length; i++) {
@@ -557,13 +560,19 @@ window.DV = window.DV || {};
       var i = lowerBoundTiles(m.tiles, from);
       for (; i < m.tiles.length; i++) { if (m.tiles[i].tileMs > to) break; n++; }
       var snap = snapshotAt(m, ms);
-      var gap = !m.covered(ms);
+      /* Asked of the WHOLE bucket, not of the instant under the pointer. The bar
+         counts a bucket's worth of tiles, so answering "was anything recorded?"
+         from one instant let a bucket straddling a restart show its bars and call
+         itself unrecorded in the same tooltip. Zoomed out a bucket is minutes
+         wide, so that was the common case, not an edge one. */
+      var offMs = m.uncoveredMs(from, to);
       var err = null;
       for (var j = 0; j < m.chunkWindows.length; j++) {
         var wd = m.chunkWindows[j];
         if (ms >= wd.startMs && ms <= wd.endMs) { err = wd; break; }
       }
-      return { ms: ms, tiles: n, bucketMs: bucketMs, snapshot: snap, gap: gap, outage: err };
+      return { ms: ms, tiles: n, bucketMs: bucketMs, snapshot: snap,
+               gap: offMs >= (to - from), offMs: offMs, outage: err };
     }
 
     return {
@@ -618,6 +627,10 @@ window.DV = window.DV || {};
 
   var SPEEDS = [-3600, -1800, -600, -300, -120, -60, -30, -10, -5, -2, -1,
                 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600];
+
+  /* How close to the newest moment counts as being AT it. A second, not a pixel:
+     a pixel is ten minutes of data when the whole file is on screen. */
+  var LIVE_EDGE_EPS = 1000;
 
   function createTransport(opts) {
     opts = opts || {};
@@ -726,9 +739,15 @@ window.DV = window.DV || {};
         }
         emit();
       },
+      /* Scrubbing drops follow, EXCEPT at the leading edge. Dragging the cursor
+         into the future is a request to watch what happens next, not to park one
+         pixel short of it -- and since the cursor clamps to t1, "the future" and
+         "the newest moment" are the same landing spot. Without this, one nudge
+         left the Live button lit while the cursor sat frozen wherever it stopped,
+         and every new row after that arrived off-screen. */
       setCursor: function (ms) {
         st.cursor = Math.max(st.t0, Math.min(st.t1, ms));
-        st.follow = false;
+        st.follow = ms >= st.t1 - LIVE_EDGE_EPS;
         emit();
       },
       play: function () { if (!st.playing) { st.playing = true; start(); emit(); } },
@@ -747,7 +766,8 @@ window.DV = window.DV || {};
       },
       step: step,
       toStart: function () { st.cursor = st.t0; st.follow = false; emit(); },
-      toEnd: function () { st.cursor = st.t1; emit(); },
+      // "Go to the end" and "follow the end" are the same intent.
+      toEnd: function () { st.cursor = st.t1; st.follow = true; emit(); },
       setLoop: function (v) { st.loop = !!v; emit(); },
       get loop() { return st.loop; },
       setFollow: function (v) { st.follow = !!v; if (v && st.model) { st.t1 = st.model.bounds.maxMs; st.cursor = st.t1; } emit(); },

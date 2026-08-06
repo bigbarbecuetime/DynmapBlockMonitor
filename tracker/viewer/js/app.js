@@ -26,7 +26,8 @@
     dataBase: "../data",
     mapType: null,           // null = let the model pick the most-logged type
     mapConfigs: null,        // per-map projection matrices, for height inference
-    tracks: null, trackScore: null, trackEvents: null, selectedTrackId: null,
+    // tracks: built from the whole log. trackView: the window's slice of it.
+    tracks: null, trackView: null, trackScore: null, trackEvents: null, selectedTrackId: null,
     portals: null, highways: null,
     politicalOn: false, politicalDate: '', politicalDates: null, politicalTiles: {},
     parseCache: {},          // memoised row parse, reused across rebuilds
@@ -88,6 +89,9 @@
     var prevView = timeline ? timeline.view() : null;
 
     state.model = M.build(state.chunkRows, state.playerRows, {
+      /* Live mode knows the clock is still running even when the file is not
+         growing; a static load knows only what the rows say. */
+      liveEdgeMs: state.live ? Date.now() : 0,
       skewMs: state.skewOverride,
       blocksPerTile: state.blocksPerTile,
       mapType: state.mapType,
@@ -414,6 +418,10 @@
     }
     state.live = true;
     $("liveBtn").setAttribute("aria-pressed", "true");
+    /* Extend BEFORE pinning: setFollow puts the cursor on bounds.maxMs, and the
+       whole point of pressing Live is to be taken to now rather than to the last
+       row -- which during a quiet stretch can be an hour behind it. */
+    if (state.model) state.model.extendLive(Date.now());
     transport.setFollow(true);
     tickLive();
     return true;
@@ -457,11 +465,36 @@
         // the other source did return.
         state.lastError = errs.join("; ");
         if (added || reset) rebuild(true);
-        else updateStatus();
+        else advanceLive();
       })
       .then(function () {
         if (state.live) state.liveTimer = setTimeout(tickLive, state.livePollMs);
       });
+  }
+
+  /* A poll that brought nothing back still moved the clock. The tracker writes no
+     row when a poll finds nothing changed, so during a quiet stretch -- an hour of
+     it, on this server, with a player online the whole time -- the file does not
+     grow and there was previously nothing to advance the cursor: live mode froze
+     on the last row and read it out as if it were the present. Moving the leading
+     edge is cheap and does not touch the model's contents; a full rebuild here
+     would cost ~380 ms every poll to change one number. */
+  function advanceLive() {
+    var m = state.model;
+    if (!m) { updateStatus(); return; }
+    // Snapshotted first: extendLive moves bounds in place, and slideView decides
+    // what to do by comparing the old edge with the new one.
+    var prevBounds = { minMs: m.bounds.minMs, maxMs: m.bounds.maxMs };
+    var prevView = timeline.view();
+    var w = transport.window();
+    if (!m.extendLive(Date.now())) { updateStatus(); return; }
+    transport.setModel(m);                       // re-pins t1 and the cursor if following
+    if (transport.follow) {
+      transport.setWindow(w.t0, m.bounds.maxMs, true);
+      slideView(prevBounds, prevView);
+    }
+    renderFast();
+    updateStatus();
   }
 
   function reason(r) { return r.reason && r.reason.message ? r.reason.message : String(r.reason); }
@@ -511,7 +544,8 @@
      and the same number of click closures per second -- and three of them cannot
      change unless the model does. */
   var lastModelRendered = null, lastWindowRendered = "";
-  var lastTracksBuilt = null;   // model+window+toggle key the tracks were built for
+  var lastTracksBuilt = null;   // data+toggle key the tracks were BUILT for
+  var lastTrackWindow = null;   // window key the built tracks were SLICED for
 
   function renderSlow() {
     var m = state.model;
@@ -526,45 +560,59 @@
       P.renderEvents($("eventFeed"), m, seek);
     }
 
-    /* Tracks depend on the model AND the window AND the toggle, so they are
-       keyed on all three. They used to be built only inside the model-changed
-       branch above, which meant switching the layer on rebuilt nothing and
-       moving the window rebuilt nothing: whatever had been built at the last
-       model change stayed on screen. That is how the viewer came to show 71
-       tracks while the same data through tools/calibrate.js gave 311 -- the
-       viewer was drawing a stale set, and the calibration panel was correctly
-       reporting "no track" for records that set did not reach.
+    /* THE WINDOW DOES NOT BUILD ANYTHING. Tracks are inferred from the whole
+       log every time (infer.js says why: attribution and the linking are both
+       whole-log arguments), so the build is keyed on the DATA
+       and the toggle, and the window only takes a slice of the result.
+
+       Keyed on the data rather than on m.stamp: the stamp is a fresh Date.now()
+       on every model rebuild, so a live poll that added nothing still relinked
+       the entire log. The last minute of data plus the model's own settings is
+       what the tracks actually depend on. A minute of granularity keeps the
+       layer current without rebuilding for a second of new data -- the same
+       reasoning the old window key used, applied to the thing that changed.
 
        Still only built when the layer is on: linking is O(tiles). */
     var wantTracks = map.get("showTracks");
-    /* Quantised to the minute on purpose. Keying on the raw window made live
-       mode rebuild every poll -- t1 advances continuously, so 300+ tracks were
-       relinked several times a second, the page stopped responding, and the
-       count visibly flickered between rebuilds. A minute of granularity keeps
-       the layer current without relinking for a second of new data. */
     var trackKey = wantTracks
-      ? (m.stamp + "|" + Math.floor(w.t0 / 60000) + "|" + Math.floor(w.t1 / 60000))
+      ? [m.blocksPerTile, m.mapType, m.renderDelayMs, m.bounds.minMs,
+         Math.floor(m.bounds.maxMs / 60000)].join("|")
       : "";
     if (trackKey !== lastTracksBuilt) {
       lastTracksBuilt = trackKey;
+      lastTrackWindow = null;                 // the slice has to be re-cut
       if (wantTracks) {
         state.tracks = DV.infer.buildTracks(m, {
-          from: w.t0, to: w.t1, portals: state.portals,
+          portals: state.portals,
           // Every map type contributes: the isometric maps fire far more often
           // than the flat one and cover moments it misses entirely.
           mapConfigs: state.mapConfigs
         });
-        state.trackScore = DV.infer.scoreTracks(m, state.tracks, { from: w.t0, to: w.t1 });
         state.trackEvents = DV.infer.linkEvents(state.tracks, m, { portals: state.portals });
         map.setTracks(state.tracks, state.trackEvents);
       } else {
-        state.tracks = null; state.trackScore = null; state.trackEvents = null; map.setTracks(null, null);
+        state.tracks = null; state.trackEvents = null; map.setTracks(null, null);
       }
-      P.renderTracks($("tracksPanel"), state.tracks, state.trackScore, m, function (tr) {
+    }
+
+    /* The slice: cheap, so it follows the window at the window's own pace.
+       state.tracks is everything the log knows; state.trackView is what this
+       range of time shows of it, and that is what the panels list. */
+    var winKey = wantTracks
+      ? (trackKey + "|" + Math.floor(w.t0 / 60000) + "|" + Math.floor(w.t1 / 60000)) : "";
+    if (winKey !== lastTrackWindow) {
+      lastTrackWindow = winKey;
+      state.trackView = state.tracks ? DV.infer.tracksInWindow(state.tracks, w.t0, w.t1) : null;
+      // Scored against the whole set: a track that began before the window is
+      // still somebody standing there during it, and the roster counts them.
+      state.trackScore = state.tracks
+        ? DV.infer.scoreTracks(m, state.tracks, { from: w.t0, to: w.t1 }) : null;
+      P.renderTracks($("tracksPanel"), state.trackView, state.trackScore, m, function (tr) {
         map.centerOn(tr.points[0].tx, tr.points[0].tz, Math.max(map.view().scale, 4));
         seek(tr.startMs);
-      }, state.trackEvents);
-      $("trackCount").textContent = state.tracks ? state.tracks.length + " found" : "";
+      });
+      $("trackCount").textContent = state.trackView
+        ? state.trackView.length + " here / " + state.tracks.length + " total" : "";
     }
 
     /* --- cursor-dependent.
@@ -595,7 +643,9 @@
     if (map.get("showTracks")) {
       $("trackFilterRow").hidden = false;
       var names = {};
-      (state.tracks || []).forEach(function (t) { if (t.player) names[t.player] = 1; });
+      // Names offered for filtering are the ones in view: a datalist of every
+      // player in four days of log is not a filter, it is a phone book.
+      (state.trackView || []).forEach(function (t) { if (t.player) names[t.player] = 1; });
       var dl = $("trackPlayers"), want = Object.keys(names).sort().join("|");
       if (dl.dataset.names !== want) {
         dl.dataset.names = want;
@@ -604,6 +654,8 @@
           var o = document.createElement("option"); o.value = n; dl.appendChild(o);
         });
       }
+      // Resolved against the whole set, not the slice: scrubbing the window past
+      // a selected track should not make the thing you are reading vanish.
       var sel = (state.tracks || []).filter(function (t) { return t.id === state.selectedTrackId; })[0];
       P.renderTrackDetail($("trackPanel"), sel, state.trackEvents, m, sel ? map.trackHue(sel) : null, seek);
     } else {
@@ -639,11 +691,14 @@
       lastTileMs: m && m.tiles.length ? m.tiles[m.tiles.length - 1].tileMs : null,
       windowT0: w.t0, windowT1: w.t1,
       mapConfigKeys: state.mapConfigs ? Object.keys(state.mapConfigs) : null,
-      tracks: state.tracks ? state.tracks.length : 0
+      tracks: state.tracks ? state.tracks.length : 0,
+      tracksInWindow: state.trackView ? state.trackView.length : 0
     };
   };
 
-  function invalidatePanels() { lastModelRendered = null; lastWindowRendered = ""; lastTracksBuilt = null; }
+  function invalidatePanels() {
+    lastModelRendered = null; lastWindowRendered = ""; lastTracksBuilt = null; lastTrackWindow = null;
+  }
 
   function renderHeatLegend() {
     var lg = map.heatLegend();
@@ -699,11 +754,14 @@
     if (!m) { $("mapBadge").textContent = "no data"; return; }
     var s = map.status();
     var w = transport.window();
-    var covered = m.covered(transport.cursor);
+    /* Off-time is quoted for the WINDOW, because the lit count next to it is a
+       window figure. Flagging the cursor instant instead put "tracker off"
+       beside a map full of tiles from the rest of the window. */
+    var offWin = m.uncoveredMs(w.t0, w.t1);
     $("mapBadge").innerHTML =
       "<b>" + s.cells.toLocaleString() + "</b> tiles lit &middot; window <b>" + M.fmtDur(w.t1 - w.t0) + "</b>" +
       (s.loading ? " &middot; loading " + s.loading + " image(s)" : "") +
-      (covered ? "" : ' &middot; <span style="color:var(--status-serious)">tracker off at cursor</span>');
+      (offWin > 1000 ? ' &middot; <span style="color:var(--status-serious)">tracker off ' + M.fmtDur(offWin) + " of it</span>" : "");
 
     var warn = $("mapWarn");
     if (s.suppressedImages) {
@@ -718,7 +776,15 @@
     var rows = state.chunkRows.length + state.playerRows.length;
     if (state.lastError) { setStatus("err", "poll error: " + state.lastError); return; }
     if (state.live) {
-      setStatus("live", "live · " + m.tiles.length.toLocaleString() + " tiles · to " + M.fmtTime(m.bounds.maxMs));
+      /* Against the newest ROW, never the leading edge -- in live mode the edge
+         is now, and "to <now>" would read as a promise that we have data up to
+         it. Saying how long the file has been silent is the honest version, and
+         it is the thing you want to know when the map has gone quiet. */
+      var quiet = m.bounds.maxMs - m.bounds.dataMaxMs;
+      setStatus("live", "live · " + m.tiles.length.toLocaleString() + " tiles · " +
+        (quiet > Math.max(30000, m.pollMs * 3)
+          ? "nothing new for " + M.fmtDur(quiet)
+          : "to " + M.fmtTime(m.bounds.dataMaxMs)));
     } else {
       setStatus("", rows.toLocaleString() + " rows · " + m.tiles.length.toLocaleString() + " tiles · " +
         m.snapshots.length + " samples");
@@ -916,26 +982,23 @@
       return;
     }
     var tracksReady = !!(state.tracks && state.tracks.length);
-    /* Tracks are only built for the VISIBLE window, so a record outside it has
-       nothing to be compared against -- and saying "no track" for one would
-       blame the model for a time it was never asked about. Worse, a record just
-       outside can still collide with an unrelated track that happens to overlap
-       the tolerance, which is where a 5270b error came from. */
-    var win = transport.window();
+    /* EVERY record is scored, wherever the window happens to be sitting. This
+       used to skip anything outside the visible range, because that was the only
+       range tracks existed for; now they are built from the whole log, so a
+       record from Tuesday has the Tuesday track to be compared against and
+       "outside window" would be hiding an answer we have. Scrolling the timeline
+       is not supposed to change the model's marks. */
     var html = "";
     for (var i = 0; i < calRecords.length; i++) {
       var r = calRecords[i];
-      var mp = (!win || r.ms < win.t0 || r.ms > win.t1) ? null : calModelPos(r);
+      var mp = calModelPos(r);
       var e = mp ? Math.hypot(mp.x - r.x, mp.z - r.z) : NaN;
       /* "tracks off" and "no track" mean different things: one is a view
          setting, the other is the model failing to place a player it should
          have. Reporting both as "no track" made a switched-off layer look like
          a modelling failure. */
       var cls = !isFinite(e) ? "is-none" : (e < 32 ? "is-near" : (e < 96 ? "is-mid" : "is-far"));
-      var outside = !win || r.ms < win.t0 || r.ms > win.t1;
-      if (outside) { cls = "is-none"; }
-      var txt = outside ? "outside window"
-              : isFinite(e) ? Math.round(e) + "b off"
+      var txt = isFinite(e) ? Math.round(e) + "b off"
               : (tracksReady ? "no track" : "tracks off");
       html += '<div class="cal__rec">' +
         '<span class="t">' + P.esc(M.fmtTime(r.ms)) + "</span>" +
@@ -1090,7 +1153,17 @@
       }
       html += '<div class="tip__r"><span>Sampled</span><b>' + M.fmtTime(p.snapshot.ms) + "</b></div>";
     }
-    if (p.gap) html += '<div class="tip__r" style="color:var(--status-serious)"><span>▲ tracker not running</span></div>';
+    /* Say which of the three it is. "Not running" is a claim that nothing here
+       was recorded, so it may only be made about a bucket that is unrecorded
+       end to end -- a bucket the tracker was up for part of gets the partial
+       line, and its bar is real for that part. */
+    if (p.gap) {
+      html += '<div class="tip__r" style="color:var(--status-serious)"><span>▲ tracker not running</span></div>';
+      if (p.tiles) html += '<div class="tip__r" style="color:var(--status-warning)"><span>⚠ changes here were logged outside any run</span></div>';
+    } else if (p.offMs > 0) {
+      html += '<div class="tip__r" style="color:var(--status-warning)"><span>▲ partly recorded</span><b>' +
+        M.fmtDur(p.offMs) + " off</b></div>";
+    }
     if (p.outage) {
       html += '<div class="tip__r" style="color:' + (p.outage.lossy ? "var(--status-critical)" : "var(--status-warning)") +
         '"><span>' + (p.outage.lossy ? "✖ tiles lost" : "⚠ poll outage, recovered") +
